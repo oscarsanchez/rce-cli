@@ -313,6 +313,7 @@ def test_show_password_shows_it_once_for_you_to_type(rce, fake_rce):
     assert result.returncode == 0, result.stderr
     password = rce.read_config()["devices"]["player"]["dev_password"]
     assert result.stderr.count(password) == 1
+    assert f"The Dev Password of player (351) is: {password}" in result.stderr
     assert password not in result.stdout
     assert keys_typed(fake_rce) == []  # you type it
 

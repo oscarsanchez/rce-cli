@@ -101,7 +101,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce token set [--json]` | Store the RCE token in rk's file from a hidden prompt or stdin. `--json` prints `{"path": "<rk's file>"}`. |
 | `rce token status [--json]` | The token's owner, organisation, expiry, and trial minutes left. |
 | `rce device list [--running] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). |
-| `rce device show <device> [--dev-password] [--json]` | One Cloud Device in detail. `--dev-password` also prints its stored Dev Password on stderr (never on stdout or in `--json`), to copy into a CI secret; with none stored it exits 4. |
+| `rce device show <device> [--dev-password] [--json]` | One Cloud Device in detail. `--dev-password` also prints its stored Dev Password on stderr, bare and alone (never on stdout or in `--json`), so a pipe can take it into a CI secret; with none stored it exits 4. |
 | `rce device alias <device> <name> [--force] [--json]` | Give a Cloud Device a Device Name. A Cloud Device has one Device Name, so naming it again renames it. A name that already names another Cloud Device exits 2 unless `--force` moves it. A Device Name can't be all digits. <!-- glossary-ok: spec command name --> |
 | `rce device resolve <name> [--json]` | Print a Device Name's RCE id (`--json`: `{"id": 351, "type": "stb"}`). Reads only the per-user config, so it needs no token or network. |
 | `rce device create <name> --type tv\|stb [--yes] [--json]` | Create a Cloud Device named `<name>` on RCE and give it that Device Name. It asks first, showing the Cloud Devices used out of the org's maximum, because a Cloud Device is permanent and can't be deleted. `--yes` skips the prompt; without a terminal and without `--yes` it refuses (exit 2). Prints the new id. |
@@ -450,14 +450,15 @@ The test app becomes the Cloud Device's dev app, replacing any other.
 
 A pipeline can run your app on a Cloud Device: start a Run from the Dev Snapshot, sideload, wait for a console line, and always stop.
 
-Dev setup is done once, by a person, from a terminal: `rce device setup-dev` pauses for steps only a person can do (see [Dev setup](#dev-setup)), so a pipeline can't do it. After it, copy what the pipeline needs into its settings:
+Dev setup is done once, by a person, from a terminal: `rce device setup-dev` pauses for steps only a person can do (see [Dev setup](#dev-setup)), so a pipeline can't do it. After it, put what the pipeline needs into its settings:
 
 ```sh
-rce snapshot list player                 # the Dev Snapshot's id: the row marked DEV
-rce device show player --dev-password    # the Cloud Device's RCE id; the Dev Password on stderr
+rce snapshot list player    # the Dev Snapshot's id: the row marked DEV
+rce device show player      # the Cloud Device's RCE id
+rce device show player --dev-password 2>&1 >/dev/null | gh secret set RCE_DEV_PASSWORD --repo <owner>/<repo>
 ```
 
-In GitHub, under Settings > Secrets and variables > Actions, add the secrets `RCE_TOKEN` (an RCE token) and `RCE_DEV_PASSWORD` (the Dev Password), and the variables `RCE_DEVICE` (the RCE id) and `RCE_SNAPSHOT` (the Dev Snapshot's id). A runner has no per-user config, so it addresses the Cloud Device by RCE id and starts from the Dev Snapshot by id.
+The last line sets the `RCE_DEV_PASSWORD` secret from stderr, which carries only the Dev Password, so it never shows on screen. In GitHub, under Settings > Secrets and variables > Actions, also add the secret `RCE_TOKEN` (an RCE token), and the variables `RCE_DEVICE` (the RCE id) and `RCE_SNAPSHOT` (the Dev Snapshot's id). A runner has no per-user config, so it addresses the Cloud Device by RCE id and starts from the Dev Snapshot by id.
 
 ```yaml
 name: roku
@@ -537,7 +538,7 @@ A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff f
 | `ROKU_RCE_CONFIG_PATH` | rk's config file, where `rce` reads the token and `rce token set` writes it. Default `~/roku-rce-config.json`. |
 | `RCE_API_URL` | Core API base URL. Default `https://api.rce.roku.com/api/v1`. Tests point it at the fake RCE. |
 | `RCE_LOCK_OWNER` | A name recorded in the device lock, so a blocked caller sees who holds it (e.g. an agent's name). |
-| `RCE_DEV_PASSWORD` | The Dev Password for every command that signs in to the installer (sideload, screenshot, selftest), for whichever Cloud Device it addresses; it wins over a stored one. For pipelines: copy it from `rce device show <device> --dev-password` into a CI secret (see [Pipelines](#pipelines-cicd)). `setup-dev` ignores it and stores its own. |
+| `RCE_DEV_PASSWORD` | The Dev Password for every command that signs in to the installer (sideload, screenshot, selftest), for whichever Cloud Device it addresses; it wins over a stored one. For pipelines: pipe it from `rce device show <device> --dev-password` into a CI secret (see [Pipelines](#pipelines-cicd)). `setup-dev` ignores it and stores its own. |
 
 ## Claude Code settings
 

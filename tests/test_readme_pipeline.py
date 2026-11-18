@@ -11,7 +11,7 @@ import pytest
 
 from conftest import REPO
 
-COMMAND = re.compile(r"(?<![\w/.-])rce((?: [a-z][\w-]*){1,2})(.*)")
+COMMAND = re.compile(r"(?<![\w/.-])rce((?: [a-z][\w-]*){1,2})([^|]*)")  # flags up to a pipe
 START, STOP = "Start the Run", "Stop the Run"  # the recipe's step names
 
 

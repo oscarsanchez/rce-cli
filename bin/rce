@@ -1155,8 +1155,8 @@ def note(message: str) -> None:
 
 
 def show_dev_password(display: str, name: str | None) -> bool:
-    """Print a Cloud Device's stored Dev Password for a person (setup-dev --show-password,
-    device show --dev-password; never in --json). Whether it had one to show."""
+    """Print a Cloud Device's stored Dev Password for a person (setup-dev --show-password;
+    never in --json). Whether it had one to show."""
     password = stored_dev_password(name)
     if password:
         note(f"The Dev Password of {display} is: {password}")
@@ -1652,11 +1652,12 @@ def cmd_device_list(args: argparse.Namespace) -> None:
 
 def cmd_device_show(args: argparse.Namespace) -> None:
     ref = resolve_device(args.device)
-    if args.dev_password and not stored_dev_password(ref.name):  # refused before any API call
+    password = stored_dev_password(ref.name) if args.dev_password else None
+    if args.dev_password and not password:  # refused before any API call
         raise RceError(REFUSED, f"no Dev Password is stored for {ref.display}.")
     d = device_detail(CoreAPI().get(f"/devices/{ref.id}"), ref.name)
-    if args.dev_password:  # only once RCE has answered for the Cloud Device
-        show_dev_password(ref.display, ref.name)
+    if password:  # only once RCE has answered; bare, alone on stderr, so a pipe can take it
+        note(password)
     run, snapshot = d["run"], d["last_snapshot_id"]
     rows = [
         ["ID:", str(d["id"])],
@@ -2372,7 +2373,7 @@ def parser() -> argparse.ArgumentParser:
     show.add_argument(
         "--dev-password",
         action="store_true",
-        help="also print its stored Dev Password, on stderr, to copy into a CI secret",
+        help="also print its stored Dev Password, bare on stderr, for a pipe into a CI secret",
     )
     show.set_defaults(func=cmd_device_show)
 

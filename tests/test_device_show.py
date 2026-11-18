@@ -76,7 +76,7 @@ def store_dev_password(rce, password: str) -> None:
     rce.config.write_text(rce.config.read_text() + f'dev_password = "{password}"\n')
 
 
-def test_show_dev_password_prints_the_stored_one_on_stderr_only(rce, fake_rce):
+def test_show_dev_password_prints_only_the_bare_value_on_stderr(rce, fake_rce):
     fake_rce.add_device(351, "Personal RCE Player", "stb")
     rce.name_device("351", "player")
     store_dev_password(rce, "stored-PASSWORD")
@@ -84,7 +84,7 @@ def test_show_dev_password_prints_the_stored_one_on_stderr_only(rce, fake_rce):
     result = rce.run("device", "show", "player", "--dev-password")
 
     assert result.returncode == 0, result.stderr
-    assert "The Dev Password of player (351) is: stored-PASSWORD" in result.stderr
+    assert result.stderr == "stored-PASSWORD\n"  # a pipe into a CI secret takes stderr whole
     assert "stored-PASSWORD" not in result.stdout
     assert "ID:             351" in result.stdout
 
