@@ -1735,8 +1735,10 @@ def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
             return device
         try:
             return wait_until_ready(api, ref, options.timeout)
-        except Exception:  # the Run must not keep billing
+        except Exception as error:  # the Run must not keep billing
             stop_after_failed_start(api, ref)
+            if isinstance(error, RceError) and error.code == REFUSED:  # 4 means no Run was made
+                raise RceError(ERROR, str(error), error.rce_code, error.status) from error
             raise
     except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
         stop_after_failed_start(api, ref)  # Stop first: a check could race RCE accepting it.

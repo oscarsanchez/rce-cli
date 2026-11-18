@@ -162,6 +162,26 @@ def test_a_start_that_is_not_ready_in_time_exits_5_and_stops_the_run(rce, fake_r
     assert "stopped" in result.stderr
 
 
+def test_a_refusal_after_rce_accepted_the_start_does_not_exit_4(rce, fake_rce):
+    """Exit 4 tells a pipeline this call made no Run, so it skips its stop. Once RCE has
+    accepted the start there is a Run, even when rce's own stop of it fails."""
+    player(rce, fake_rce)
+    fake_rce.boot_delay = 1
+    fake_rce.fail_next("POST", STOP, Response(500, {"detail": "Internal Server Error"}))
+    start = rce.spawn("device", "start", "player")
+    deadline = time.monotonic() + 30
+    while not fake_rce.devices[351].get("running_device") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    uuid = fake_rce.devices[351]["running_device"]["instance_uuid"]
+    ready = f"/instance/{uuid}/api/v0/input/ready"  # glossary-ok
+    fake_rce.fail_next("GET", ready, Response(401, {"detail": "Not authenticated"}))
+    _, stderr = start.communicate(timeout=60)
+
+    assert start.returncode == 1
+    assert "rejected the token" in stderr
+    assert "It is billing" in stderr
+
+
 def test_starting_a_device_that_is_already_running_is_refused(rce, fake_rce):
     fake_rce.add_device(351, "Personal RCE Player", "stb", running=True)
     rce.name_device("351", "player")

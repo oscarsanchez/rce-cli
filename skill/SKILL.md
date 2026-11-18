@@ -53,7 +53,7 @@ Ask-first (rule 1): `device create <name> --type tv|stb`, `device retire`, `devi
 | Code | Meaning | Usual next move |
 |---|---|---|
 | 0 | OK | |
-| 1 | RCE unreachable or a 5xx | Retry later; tell the user. |
+| 1 | RCE unreachable or a 5xx; also a `device start` refused after RCE accepted it (a Run was made) | Retry later; tell the user. |
 | 2 | Usage: bad arguments, no token, confirmation declined or impossible without a terminal | Fix the call, or hand it to the user. |
 | 3 | Not found: Cloud Device, Device Name, Snapshot, ECP command or app | `rce device list`, `rce snapshot list`. |
 | 4 | Refused: not running, already running, trial Run limit or trial used up, locked, rejected token, dev mode or "Control by mobile apps" missing, wrong or missing Dev Password (`setup-dev` stores one; pipelines set `RCE_DEV_PASSWORD`), failed install, no dev app in the foreground | Read the message: it names the cause and often the command that fixes it. |
