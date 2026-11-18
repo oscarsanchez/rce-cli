@@ -11,7 +11,7 @@ scripts/record-live <device>          # free Core API reads only
 scripts/record-live <device> --run    # plus one Run (1 to 2 device-minutes); read docs/agents/live-rce.md first
 ```
 
-`<device>` is the Device Name to record from: agents use `auto`, per `docs/agents/live-rce.md`.
+`<device>` is the Device Name to record from: agents use the agents' Cloud Device, per `docs/agents/live-rce.md`.
 
 Then run `scripts/check`. A test that fails after a re-record is either a fake that read a field it should set itself, or a live change that `rce` needs to handle.
 
