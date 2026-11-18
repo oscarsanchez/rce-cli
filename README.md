@@ -489,7 +489,12 @@ jobs:
       - name: Build
         run: zip -r app.zip manifest source components images   # your build
       - name: Start the Run
-        run: rce device start "$RCE_DEVICE" --snapshot "$RCE_SNAPSHOT" --max-runtime 1500 --json
+        id: start
+        run: |
+          status=0
+          rce device start "$RCE_DEVICE" --snapshot "$RCE_SNAPSHOT" --max-runtime 1500 --json || status=$?
+          if [ "$status" -eq 4 ]; then echo "refused=true" >> "$GITHUB_OUTPUT"; fi   # no Run of ours to stop
+          exit "$status"
       - name: Sideload and wait for the app
         run: |
           rce console "$RCE_DEVICE" --until 'app ready' --timeout 120 --strip-ansi &
@@ -498,13 +503,14 @@ jobs:
           rce launch "$RCE_DEVICE"
           wait "$console"
       - name: Stop the Run
-        if: always()   # also after a failed step or a cancelled job
+        if: always() && steps.start.outputs.refused != 'true'   # also after a failed step or a cancelled job
         run: rce device stop "$RCE_DEVICE" --json
 ```
 
 Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Replace `app ready` with a line your app prints when it is ready.
 
-- **One Cloud Device per pipeline.** The `concurrency` group serialises this pipeline's jobs on its Cloud Device. The device lock can't do it: it only coordinates `rce` processes on one machine, and each job runs on its own runner. The always-run stop step stops whatever Run is on that Cloud Device, including one a person started, so give the pipeline its own Cloud Device and don't use it yourself.
+- **One Cloud Device per pipeline.** The `concurrency` group serialises this pipeline's jobs on its Cloud Device. The device lock can't do it: it only coordinates `rce` processes on one machine, and each job runs on its own runner. Give the pipeline its own Cloud Device and don't use it yourself: the stop step stops whatever Run is on that Cloud Device.
+- **A refused start stops nothing.** `rce device start` exits 4 only when RCE refused the start, or the Cloud Device was already running or locked, so that call made no Run; the Run on the Cloud Device, if any, is someone else's. The start step records that (`refused=true`) and the stop step skips. Any other way the start can fail may have made a Run, so the stop step still runs then, as it does after a failed later step or a cancelled job; a start step that is cancelled or killed records nothing.
 - **Only the newest waiting job runs.** GitHub keeps at most one running and one pending job per `concurrency` group: a newer push cancels the older pending job, while the running job finishes. Adding `cancel-in-progress: true` to the group also cancels the running job; its stop step still runs, since `if: always()` covers a cancelled job.
 - **One Run at a time.** The trial allows one Run at a time across the organisation, so while a job's Run is going any other start, from another pipeline or from you at a terminal, is refused (exit 4).
 - **A killed job bills until the cap.** If the runner dies before the stop step runs, the Run bills until its cap: 60 minutes by default, or `--max-runtime` (25 minutes above, a little over the job's `timeout-minutes`). `rce device list --running` shows a Run left on.
