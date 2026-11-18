@@ -2,20 +2,29 @@
 
 Read before any command that talks to real RCE beyond a free read (`device list`, `device show`, `device status`, `device resolve`, `token status`, `usage`, `snapshot list`). A Run bills by the minute and RCE has no idle stop.
 
+## Which Cloud Device
+
+- **`auto` is the agents'.** Agents start Runs only on the Cloud Device with Device Name `auto`. `player` is the maintainer's and `tv` stays off: agents start nothing on either.
+- **No `auto`, no Run.** Until `rce device list` shows `auto`, agents start nothing.
+
+## The standing OK
+
+A Run on `auto` needs no OK in the conversation when it keeps every rule below: one Run at a time, `rce device list --running` empty first, `--max-runtime 600` or less, `RCE_LOCK_OWNER` set, every step guarded, stop in a finally path, and the record on the ticket.
+
+These still need the maintainer's OK in this conversation, each time: `device create`, `device retire`, `setup-dev`, `snapshot take`, `snapshot use-as-dev`, `token set`, `selftest --live`, and any Run on another Cloud Device. A ticket's "Live:" line says what to check, not that it is approved.
+
 ## Before
 
-- **The user's OK.** Starting a Run, `selftest --live`, `setup-dev` and any other script that starts a Run need the user's explicit OK in this conversation. A ticket's "Live:" line says what to check, not that it is approved.
-- **Token.** Use the one `rce` already reads (`~/roku-rce-config.json`, or `RCE_TOKEN` in the environment the user gave you). Read no token from another repo or file.
-- **Device.** Only the Cloud Device the maintainer keeps for live checks (Device Name `player`). Every other Cloud Device stays off. `device create` and `device retire` are the user's.
+- **Token.** Use the one `rce` already reads (`~/roku-rce-config.json`, or `RCE_TOKEN` in the environment the maintainer gave you). Read no token from another repo or file.
 - **Nothing running.** `rce device list --running` is empty first; if not, report it and start nothing.
 
 ## During
 
 - **One Run at a time.** Set `RCE_LOCK_OWNER=<ticket or task>` so the device lock names you.
-- **Cap it.** Pass `--max-runtime 600` (or the smallest cap that fits) as a backstop.
+- **Cap it.** Pass `--max-runtime 600` or less (the smallest cap that fits) as a backstop.
 - **Guard every step.** A script continues only if the previous step succeeded. A failed start must never lead to a second start.
 - **Stop in a finally path** (a shell `trap ... EXIT`), then confirm `rce device list --running` is empty.
-- **Prompts.** `setup-dev`, `selftest --live` and other live scripts ask `[y/N]` on a terminal. Answer one the user has approved through `scripts/tty-drive LOG FIFO -- <command>` and `echo y > FIFO`. Leave out `--yes` unless the user asked for it.
+- **Prompts.** `setup-dev`, `selftest --live` and other live scripts ask `[y/N]` on a terminal. Answer one the maintainer has approved through `scripts/tty-drive LOG FIFO -- <command>` and `echo y > FIFO`. Leave out `--yes` unless the maintainer asked for it.
 
 ## After
 
