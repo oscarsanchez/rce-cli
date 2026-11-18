@@ -121,7 +121,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce snapshot take <device> --label NAME [--timeout S] [--yes] [--json]` | Take a Snapshot named NAME (3 to 255 characters) and wait until RCE has saved it (default timeout 600 s, then exit 5). It asks first unless `--yes` (no terminal means no, exit 2). At the Cloud Device's Snapshot limit it exits 4; `rce` doesn't delete Snapshots. With the Cloud Device off, RCE saves its latest state. See [Snapshots](#snapshots). <!-- glossary-ok: spec flag name --> |
 | `rce snapshot use-as-dev <device> <id> [--yes] [--json]` | Make a ready Snapshot the Cloud Device's Dev Snapshot, which `device start` then uses by default. It asks first unless `--yes` (no terminal means no, exit 2). Exits 3 for a Snapshot the Cloud Device doesn't have, or a Cloud Device without a Device Name; 4 for a Snapshot that isn't ready. |
 | `rce console <device> [--until REGEX] [--timeout S] [--strip-ansi] [--json]` | Stream the running Cloud Device's BrightScript console. See [Console](#console). |
-| `rce forward <device> <port> [--local N] [--json]` | Forward a running Cloud Device's TCP port to `127.0.0.1`, so `nc`, debuggers and the SceneGraph inspector work unchanged. See [Forward](#forward). |
+| `rce forward <device> <port> [--local N] [--json]` | Forward a running Cloud Device's TCP port to `127.0.0.1`, for the BrightScript console and its debugger (with `nc`), the SceneGraph inspector and the TypeScript debugger. See [Forward](#forward). |
 
 `<device>` is a Device Name or a raw RCE id, in every command that takes a Cloud Device.
 
