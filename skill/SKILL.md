@@ -64,10 +64,10 @@ Ask-first (rule 1): `device create <name> --type tv|stb`, `device retire`, `devi
 
 Claim success only from evidence the Cloud Device gave you:
 
-1. **Console**: start `rce console <device> --until '<marker line>' --timeout 120 --strip-ansi` in the background *before* `sideload` or `launch`, since it shows only lines printed after it connects. Exit 0 is the evidence; exit 5 means the line never came.
-2. **ECP state**: `rce ecp <device> query/active-app --json` shows which app is in the foreground; `query/device-info --json` shows `developer-enabled` and `ecp-setting-mode`.
-3. **Screenshot**: `rce screenshot <device> -o /tmp/shot.jpg`, then Read the JPEG to look at it. It fails (exit 4) unless the dev app is in the foreground.
+1. **Console**: start `rce console <device> --until '<marker line>' --timeout 120 --strip-ansi` in the background *before* `sideload` or `launch`, so it catches every line of this launch. A new connection first replays earlier lines, so the marker must be unique to this launch (a fresh tag, e.g. from `launch --param`). Exit 0 is the evidence; exit 5 means the line never came.
+2. **ECP state**: `rce ecp <device> query/active-app --json` shows which app is in the foreground; `query/device-info --json` shows `developer-enabled` and `ecp-setting-mode`; `query/app-ui` gives the SceneGraph tree as XML, with `focused="true"` on the focused nodes.
+3. **Screenshot**: `rce screenshot <device> -o /tmp/shot.jpg`, then Read the JPEG to look at it. It fails (exit 4) unless the dev app is in the foreground. During playback it shows the video frame.
 
 ## Debuggers
 
-`rce forward <device> <port>` makes `127.0.0.1:<port>` reach the device port. Through it work the BrightScript console on 8085 (with `nc`), the BrightScript console's debugger (it runs in the console, on 8085 too), the SceneGraph inspector on 8080, and the TypeScript debugger on 9999. The VS Code BrightScript debugger does not work yet: it installs the app over port 80 and launches it over port 8060, and `forward` refuses both. `forward` runs until interrupted, so start it in the background and stop it when done. Ports 80 and 8060 are HTTP: use `sideload` and `ecp` for those.
+`rce forward <device> <port>` makes `127.0.0.1:<port>` reach the device port. Through it work the BrightScript console on 8085 (with `nc`), the BrightScript console's debugger (it runs in the console, on 8085 too), the SceneGraph inspector on 8080, and the TypeScript debugger on 9999. The VS Code BrightScript debugger does not work yet: it installs the app over port 80 and launches it over port 8060, and `forward` refuses both. `forward` runs until interrupted, so start it in the background and stop it when done. The console takes one client at a time: while `rce console` is attached, `nc` on 8085 gets "Console connection is already in use." and is hung up, so stop `rce console` first. Ports 80 and 8060 are HTTP: use `sideload` and `ecp` for those.
