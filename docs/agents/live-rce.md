@@ -13,10 +13,12 @@ A Run on `auto` needs no OK in the conversation when it keeps every rule below: 
 
 These still need the maintainer's OK in this conversation, each time: `device create`, `device retire`, `setup-dev`, `snapshot take`, `snapshot use-as-dev`, `token set`, `selftest --live`, and any Run on another Cloud Device. A ticket's "Live:" line says what to check, not that it is approved.
 
+`setup-dev`'s web-viewer steps (account link, Developer Settings, Control by mobile apps) are the maintainer's: the developer portal's View device opens outside an agent-driven browser tab.
+
 ## Before
 
 - **Token.** Use the one `rce` already reads (`~/roku-rce-config.json`, or `RCE_TOKEN` in the environment the maintainer gave you). Read no token from another repo or file.
-- **Nothing running.** `rce device list --running` is empty first; if not, report it and start nothing.
+- **Nothing running.** `rce device list --running` is empty first: wait your turn (Sharing `auto`).
 
 ## During
 
@@ -25,6 +27,15 @@ These still need the maintainer's OK in this conversation, each time: `device cr
 - **Guard every step.** A script continues only if the previous step succeeded. A failed start must never lead to a second start.
 - **Stop in a finally path** (a shell `trap ... EXIT`), then confirm `rce device list --running` is empty.
 - **Prompts.** `setup-dev`, `selftest --live` and other live scripts ask `[y/N]` on a terminal. Answer one the maintainer has approved through `scripts/tty-drive LOG FIFO -- <command>` and `echo y > FIFO`. Leave out `--yes` unless the maintainer asked for it.
+
+## Sharing `auto`
+
+Several agents may work on `auto` at once, and the trial runs one Run at a time across the whole org.
+
+- **Wait your turn.** Before each start, while `rce device list --running` isn't empty, re-check every 60 s; after 20 min, report it and start nothing.
+- **Know your Run.** Note your Run id (`run.id` from `rce device start --json`). Before each `rce` call that reaches a Run (`console`, `sideload`, `key`, `launch`, `screenshot`, `ecp`, `forward`), confirm `rce device status auto --json` still shows that id.
+- **Stop only yours.** The trap stops `auto` only while its Run is still your id.
+- **A refused start (exit 4) made no Run.** Another start won: stop nothing, and wait your turn before the next start.
 
 ## After
 
