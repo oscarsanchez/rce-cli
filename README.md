@@ -53,11 +53,12 @@ If you keep the CLI install too, pull and run `./install.sh` again: `rce` moved 
 ## Getting started
 
 ```sh
-pbpaste | rce token set           # or `rce token set` and paste at the hidden prompt
-rce token status                  # who the token belongs to, expiry, trial minutes left
-rce device list                   # your Cloud Devices and their RCE ids
-rce device alias 351 player       # give one a Device Name (glossary-ok)
-rce device setup-dev player       # once per Cloud Device: developer mode and a Dev Snapshot
+pbpaste | rce token set               # or `rce token set` and paste at the hidden prompt
+rce token status                      # who the token belongs to, expiry, trial minutes left
+rce device list                       # your Cloud Devices and their RCE ids
+rce device create player --type stb   # only if you have none: permanent, counts against the org quota
+rce device alias 351 player           # or give one you already have a Device Name (glossary-ok)
+rce device setup-dev player           # once per Cloud Device: developer mode and a Dev Snapshot
 ```
 
 `setup-dev` runs in your terminal and pauses for the steps only you can do (linking your Roku account in the RCE web console, accepting the developer licence); see [Dev setup](#dev-setup). After it, every Run starts dev-ready. A typical day:

@@ -42,7 +42,7 @@ On a running Cloud Device:
 | `ecp <device> <path> [--method POST]` | Any ECP command; `query/active-app`, `query/device-info` give JSON with `--json`. |
 | `console <device> --until REGEX --timeout S --strip-ansi` | BrightScript console; exits 0 on the first match, 5 on timeout. |
 | `screenshot <device> -o FILE` | JPEG of the foreground dev app only. |
-| `forward <device> <port> [--local N]` | Local TCP port bridged to a device port, for existing debuggers. |
+| `forward <device> <port> [--local N]` | Local TCP port bridged to a device port, for the console, the SceneGraph inspector and the debuggers in Debuggers. |
 
 Ask-first (rule 1): `device create <name> --type tv|stb`, `device retire`, `device setup-dev`, `token set`, `snapshot take <device> --label NAME`, `snapshot use-as-dev <device> <id>`, `selftest --live [--device NAME]` (proves `rce` end to end on a Cloud Device). <!-- glossary-ok: spec flag name -->
 
@@ -70,4 +70,4 @@ Claim success only from evidence the Cloud Device gave you:
 
 ## Debuggers
 
-`rce forward <device> <port>` makes `127.0.0.1:<port>` reach the device port, so `nc`, the VS Code BrightScript debugger and the SceneGraph inspector work unchanged: 8085 console, 8081/8082 BrightScript debugger, 8080 SceneGraph inspector, 9999 TypeScript debugger. It runs until interrupted, so start it in the background and stop it when done. Ports 80 and 8060 are HTTP: use `sideload` and `ecp` for those.
+`rce forward <device> <port>` makes `127.0.0.1:<port>` reach the device port: 8085 console, 8081/8082 BrightScript debugger, 8080 SceneGraph inspector, 9999 TypeScript debugger. Through it work the console on 8085 (with `nc`) and its debugger, the SceneGraph inspector on 8080, and the TypeScript debugger on 9999. The VS Code BrightScript debugger does not work yet: it installs the app over port 80 and launches it over port 8060, and `forward` refuses both. It runs until interrupted, so start it in the background and stop it when done. Ports 80 and 8060 are HTTP: use `sideload` and `ecp` for those.
