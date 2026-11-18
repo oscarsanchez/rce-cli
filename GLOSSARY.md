@@ -16,6 +16,10 @@ _Avoid_: emulator, RCE instance, simulator, virtual device
 The local name a user gives a Cloud Device, mapped to its RCE id.
 _Avoid_: alias, nickname, label
 
+**Per-user config**:
+The file on a person's machine, shared by every project, that holds their Device Names and what rce stores with each.
+_Avoid_: device config, devices file, settings file
+
 **Run**:
 One start-to-stop period of a Cloud Device. It has its own address and is billed by the minute.
 _Avoid_: session, instance, boot
