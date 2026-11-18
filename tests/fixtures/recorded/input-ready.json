@@ -1,0 +1,10 @@
+{
+  "request": "GET /instance/00000000-0000-4000-8000-000000000000/api/v0/input/ready",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "ready": true
+  }
+}

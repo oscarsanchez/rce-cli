@@ -1,0 +1,16 @@
+# Dev tooling only: `rce` itself is a single-file uv script with inline deps.
+[project]
+name = "rce-cli"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-xdist>=3"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]

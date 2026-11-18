@@ -1,0 +1,25 @@
+{
+  "request": "GET /api/v1/usage/user?start=2026-11-10T17%3A49%3A00Z&end=2026-11-17T17%3A49%3A00Z&interval=24h",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "user_email": "REDACTED",
+    "start": "2026-11-10T17:49:00Z",
+    "end": "2026-11-17T17:49:00Z",
+    "interval": "24h",
+    "buckets": [
+      {
+        "start": "2026-11-16T00:00:00Z",
+        "stop": "2026-11-17T00:00:00Z",
+        "value": 26
+      },
+      {
+        "start": "2026-11-17T00:00:00Z",
+        "stop": "2026-11-17T17:49:00Z",
+        "value": 70
+      }
+    ]
+  }
+}

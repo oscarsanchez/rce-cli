@@ -1,0 +1,8 @@
+{
+  "request": "POST /instance/00000000-0000-4000-8000-000000000000/api/v0/ports/80/http/plugin_install",
+  "status": 200,
+  "headers": {
+    "content-type": "text/html"
+  },
+  "body": "<font color=\"red\">Application Received: Identical to previous version -- not replacing.</font>\n      var params = JSON.parse('{\"messages\":[{\"text\":\"Application Received: Identical to previous version -- not replacing.\",\"text_type\":\"text\",\"type\":\"info\"}],\"metadata\":{\"dev_id\":\"REDACTED\",\"dev_key\":false,\"voice_sdk\":false},\"packages\":[{\"appType\":\"channel\",\"archiveFileName\":\"record-live.zip\",\"fileType\":\"zip\",\"id\":\"0\",\"location\":\"nvram\",\"md5\":\"d48e5061102e6e9ef8caad22f3d28d89\",\"pkgPath\":\"\",\"size\":\"517\"}]}');\n"
+}

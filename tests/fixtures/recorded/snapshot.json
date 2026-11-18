@@ -1,0 +1,22 @@
+{
+  "request": "GET /api/v1/devices/351/snapshots/1043",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": 1043,
+    "created_at": "2026-11-17T10:54:26.719331Z",
+    "parent_id": 998,
+    "name": "dev-ready",
+    "firmware_version_display_name": "v16.0.4 b853",
+    "started_at": "2026-11-17T16:26:11.851022Z",
+    "children": [],
+    "ready": true,
+    "live": false,
+    "base": false,
+    "note": null,
+    "properties": null,
+    "firmware_version_id": "395"
+  }
+}

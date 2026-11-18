@@ -1,0 +1,25 @@
+{
+  "request": "GET /api/v1/user/me",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "REDACTED",
+    "username": "REDACTED",
+    "full_name": "REDACTED",
+    "email": "REDACTED",
+    "organisation": {
+      "id": 1,
+      "idp_id": "REDACTED",
+      "name": "REDACTED",
+      "max_devices": 25,
+      "max_snapshots": 25,
+      "max_project_runtime": 172800,
+      "current_devices": {
+        "stb": 1,
+        "tv": 1
+      }
+    }
+  }
+}

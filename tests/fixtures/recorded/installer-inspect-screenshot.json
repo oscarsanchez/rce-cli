@@ -1,0 +1,8 @@
+{
+  "request": "POST /instance/00000000-0000-4000-8000-000000000000/api/v0/ports/80/http/plugin_inspect",
+  "status": 200,
+  "headers": {
+    "content-type": "text/html"
+  },
+  "body": "    <font color=\"red\">Screenshot ok</font>\n      Shell.create('Roku.Message').trigger('Set message type', 'success').trigger('Set message content', 'Screenshot ok').trigger('Render', node);\n      screenshoot.innerHTML = '<hr /><img src=\"pkgs/dev.jpg?time=1794937786\">';\n"
+}

@@ -1,0 +1,29 @@
+{
+  "request": "GET /api/v1/firmwareVersions",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": [
+    {
+      "firmware_version_id": "303",
+      "device_type": "tv",
+      "display_name": "v15.3.4 b872"
+    },
+    {
+      "firmware_version_id": "304",
+      "device_type": "stb",
+      "display_name": "v15.3.4 b872"
+    },
+    {
+      "firmware_version_id": "395",
+      "device_type": "stb",
+      "display_name": "v16.0.4 b853"
+    },
+    {
+      "firmware_version_id": "396",
+      "device_type": "tv",
+      "display_name": "v16.0.4 b853"
+    }
+  ]
+}

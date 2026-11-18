@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The one check: both lints, then the test suite. The pre-commit hook runs it.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+uv run --quiet python scripts/lint_glossary.py
+uv run --quiet python scripts/lint_test_imports.py
+uv run --quiet pytest -q -n auto

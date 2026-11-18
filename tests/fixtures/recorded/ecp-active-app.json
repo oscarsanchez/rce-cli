@@ -1,0 +1,8 @@
+{
+  "request": "GET /instance/00000000-0000-4000-8000-000000000000/api/v0/ports/8060/http/query/active-app",
+  "status": 200,
+  "headers": {
+    "content-type": "text/xml; charset=\"utf-8\""
+  },
+  "body": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<active-app>\n\t<app id=\"562859\" type=\"home\" version=\"26.40.12\" ui-location=\"home\">Roku Dynamic Menu</app>\n</active-app>\n"
+}

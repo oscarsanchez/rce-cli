@@ -1,0 +1,77 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Claude Code Stop hook: warn when a Run is still billing.
+
+Runs `rce device list --running --json` (the plugin's `bin/rce` under
+$CLAUDE_PLUGIN_ROOT when set, else `rce` on PATH) and, when a Cloud Device has a Run,
+prints {"systemMessage": ...} naming each one and how long it has billed.
+That shows the user a warning without stopping Claude from finishing.
+Silent (exit 0, no output) when nothing runs, `rce` is missing, no token is
+configured, RCE is unreachable, or it doesn't answer within TIMEOUT seconds.
+"""
+
+import json
+import os
+import signal
+import subprocess
+from datetime import datetime, timezone
+
+TIMEOUT = 5  # seconds
+
+
+def rce_command() -> str:
+    """The plugin's own `rce` when run as the plugin's hook, else `rce` on PATH."""
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    return os.path.join(plugin_root, "bin", "rce") if plugin_root else "rce"
+
+
+def running_devices() -> list[dict]:
+    try:
+        rce = subprocess.Popen(
+            [rce_command(), "device", "list", "--running", "--json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            process_group=0,  # so a timeout kills uv and the Python under it
+        )
+    except OSError:
+        return []
+    try:
+        out, _ = rce.communicate(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        os.killpg(rce.pid, signal.SIGKILL)
+        rce.wait()
+        return []
+    if rce.returncode != 0:
+        return []
+    try:
+        return json.loads(out)
+    except ValueError:
+        return []
+
+
+def elapsed(since: str) -> str:
+    started = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    minutes = int((datetime.now(timezone.utc) - started).total_seconds()) // 60
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes:02d} min" if hours else f"{minutes} min"
+
+
+def main() -> None:
+    runs = [
+        f"{d['device_name'] or d['name']} ({d['id']}) for {elapsed(d['run']['created_at'])}"
+        for d in running_devices()
+        if d.get("run")
+    ]
+    if runs:
+        message = (
+            f"RCE Run still billing: {', '.join(runs)}. "
+            "Stop it with `rce device stop <device>` unless you mean to keep it."
+        )
+        print(json.dumps({"systemMessage": message}))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,14 @@
+{
+  "name": "rce-cli",
+  "owner": {
+    "name": "Oscar Sanchez"
+  },
+  "description": "The rce-cli plugin: a client for Roku® Cloud Emulator.",
+  "plugins": [
+    {
+      "name": "rce-cli",
+      "source": "./",
+      "description": "The rce CLI, skill and Stop hook for Roku® Cloud Emulator. macOS/Linux, needs uv."
+    }
+  ]
+}

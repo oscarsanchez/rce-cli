@@ -1,0 +1,54 @@
+{
+  "request": "GET /api/v1/devices/351",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": 351,
+    "device_type": "stb",
+    "name": "Personal RCE Player",
+    "account_name": null,
+    "last_snapshot_name": "dev-ready",
+    "snapshots": [
+      997,
+      998,
+      1043
+    ],
+    "status": "running",
+    "created_at": "2026-11-11T15:35:01.507984Z",
+    "note": null,
+    "serial_number": "REDACTED",
+    "properties": null,
+    "firmware_version_id": "395",
+    "firmware_version_display_name": "v16.0.4 b853",
+    "last_snapshot_id": 1043,
+    "running_device": {
+      "id": 4300,
+      "creator_id": "REDACTED",
+      "created_at": "2026-11-17T17:49:04.089276Z",
+      "started_at": "2026-11-17T17:49:05.118224Z",
+      "running_at": "2026-11-17T17:49:20Z",
+      "snapshot_id": 1043,
+      "snapshot_name": "dev-ready",
+      "janus_id": 0,
+      "janus_pin": "REDACTED",
+      "janus_token": "REDACTED",
+      "janus_websocket_url": "wss://device.rce.roku.com/instance/00000000-0000-4000-8000-000000000000/janus",
+      "janus_ice_servers": [
+        {
+          "urls": [
+            "turn:ice.rce.roku.com:3478",
+            "turns:ice.rce.roku.com:443?transport=tcp"
+          ],
+          "username": "REDACTED",
+          "credential": "REDACTED"
+        }
+      ],
+      "instance_api_url": "https://device.rce.roku.com/instance/00000000-0000-4000-8000-000000000000",
+      "instance_uuid": "00000000-0000-4000-8000-000000000000",
+      "firmware_version_id": "395",
+      "max_runtime": 600
+    }
+  }
+}

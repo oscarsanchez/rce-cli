@@ -1,0 +1,2585 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx>=0.27,<1", "tomli-w>=1,<2", "websockets>=13,<16"]
+# ///
+"""rce: a command-line client for Roku Cloud Emulator (RCE). See README.md."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import codecs
+import fcntl
+import getpass
+import io
+import json
+import os
+import queue
+import re
+import secrets
+import shlex
+import socket
+import sys
+import threading
+import time
+import tomllib
+import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote, urlsplit
+from xml.etree import ElementTree
+
+import httpx
+import tomli_w
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
+from websockets.sync.client import ClientConnection
+from websockets.sync.client import connect as ws_connect
+
+VERSION = "0.1.0"  # the one source of truth; the plugin manifest repeats it, a test checks
+
+# Exit codes: a public contract, documented in README.md.
+OK, ERROR, USAGE, NOT_FOUND, REFUSED, TIMEOUT = 0, 1, 2, 3, 4, 5
+INTERRUPTED = 130  # Ctrl-C, as shells report SIGINT
+
+DEFAULT_API_URL = "https://api.rce.roku.com/api/v1"
+
+
+class RceError(Exception):
+    def __init__(
+        self, code: int, message: str, rce_code: str | None = None, status: int | None = None
+    ):
+        super().__init__(message)
+        self.code = code
+        self.rce_code = rce_code  # RCE's own error code, e.g. "trial_exhausted"
+        self.status = status  # RCE's HTTP status, when RCE answered with an error
+
+
+def write_private(path: Path, text: str) -> None:
+    """Replace a file atomically, mode 0600 from the start."""
+    temp = path.with_name(f".{path.name}.{os.getpid()}")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as file:
+        file.write(text)
+    os.replace(temp, path)
+
+
+# -- token ---------------------------------------------------------------------
+
+
+TOKEN_VARS = ("RCE_TOKEN", "RK_RCE_TOKEN")  # in priority order, over rk's file
+RK_CONFIG_VAR = "ROKU_RCE_CONFIG_PATH"  # moves rk's file, for rk and rce alike
+EXPIRY_WARNING_DAYS = 14
+RENEW = "Create a new one in the RCE web UI (Tokens > Add token) and store it with `rce token set`."
+
+
+def rk_config_path() -> Path:
+    """rk's RCE config file; rce shares its token with rk."""
+    return Path(os.environ.get(RK_CONFIG_VAR) or Path.home() / "roku-rce-config.json")
+
+
+def read_rk_config() -> dict:
+    """rk's RCE config file as a dict; empty when the file is missing."""
+    path = rk_config_path()
+    try:
+        config = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        raise RceError(USAGE, f"cannot read {path}: {type(error).__name__}")
+    if not isinstance(config, dict):
+        raise RceError(USAGE, f"cannot read {path}: not a JSON object")
+    return config
+
+
+def store_token(token: str) -> Path:
+    """Write the token to rk's file (mode 0600), keeping the other keys rk stores there."""
+    path = rk_config_path()
+    config = {**read_rk_config(), "token": token}
+    write_private(path, json.dumps(config, indent=2))
+    return path
+
+
+def token_claims(token: str) -> dict:
+    """The token's claims (it is a JWT), decoded locally; empty if it has none."""
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def token_expiry(claims: dict) -> datetime | None:
+    """The `exp` claim as a time; None if the token has none."""
+    try:
+        return datetime.fromtimestamp(int(claims["exp"]), timezone.utc)
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def token_owner(claims: dict) -> str | None:
+    """The `sub` claim: the id of the user the token belongs to."""
+    sub = claims.get("sub")
+    return str(sub) if sub is not None else None
+
+
+def load_token() -> tuple[str, str]:
+    """The RCE token and where it came from (for messages, never the value)."""
+    for var in TOKEN_VARS:
+        if os.environ.get(var):
+            return os.environ[var], f"${var}"
+    path = rk_config_path()
+    token = read_rk_config().get("token")
+    if not token:
+        raise RceError(
+            USAGE,
+            f"no RCE token found. Looked in ${TOKEN_VARS[0]}, ${TOKEN_VARS[1]} and {path}. "
+            f"Store one with `rce token set` or set ${TOKEN_VARS[0]}.",
+        )
+    return token, str(path)
+
+
+# -- per-user config -------------------------------------------------------------
+
+# One TOML file per user, shared by every project. Each Device Name is a table
+# under [devices] holding its Cloud Device's RCE id and type; later fields for
+# that Cloud Device (Dev Password, Dev Snapshot id, setup-dev state) go in the
+# same table:
+#
+#   [devices.player]
+#   id = 351
+#   type = "stb"
+
+
+def config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "roku-rce" / "devices.toml"
+
+
+def load_config() -> dict:
+    """The per-user config; empty until the first save."""
+    path = config_path()
+    try:
+        return tomllib.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        raise RceError(USAGE, f"cannot read {path}: {error}")
+
+
+def save_config(config: dict) -> None:
+    """Replace the per-user config atomically, mode 0600 from the start."""
+    path = config_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_private(path, tomli_w.dumps(config))
+
+
+def describe(id: int, name: str | None) -> str:
+    """How messages name a Cloud Device: its Device Name (or RCE name) and id."""
+    return f"{name} ({id})" if name else f"Cloud Device {id}"
+
+
+def device_entries() -> dict:
+    """The per-user config's tables, one per Device Name."""
+    return load_config().get("devices", {})
+
+
+def device_entry(name: str) -> dict:
+    """What the per-user config stores with a Device Name."""
+    return device_entries()[name]
+
+
+@dataclass(frozen=True)
+class DeviceRef:
+    id: int
+    name: str | None  # its Device Name, if it has one
+
+    @property
+    def display(self) -> str:
+        """How messages name it: its Device Name and id."""
+        return describe(self.id, self.name)
+
+    @property
+    def arg(self) -> str:
+        """How a command line names it: its Device Name, else its id."""
+        return self.name or str(self.id)
+
+
+def is_raw_id(text: str) -> bool:
+    return re.fullmatch(r"[0-9]+", text) is not None
+
+
+def device_names_by_id() -> dict[int, str]:
+    return {entry["id"]: name for name, entry in device_entries().items()}
+
+
+def check_device_name(name: str) -> None:
+    """A new Device Name must not read as an RCE id."""
+    if is_raw_id(name):
+        raise RceError(USAGE, f"a Device Name can't be all digits ({name!r}): it reads as an RCE id")
+
+
+def name_taken(name: str, holder: int) -> str:
+    return f"Device Name {name!r} already names Cloud Device {holder}."
+
+
+def resolve_device(ref: str) -> DeviceRef:
+    """A Device Name or a raw RCE id, as every command that takes a device accepts."""
+    names = device_names_by_id()
+    by_name = {name: id for id, name in names.items()}
+    if ref in by_name:
+        return DeviceRef(by_name[ref], ref)
+    if is_raw_id(ref):
+        return DeviceRef(int(ref), names.get(int(ref)))
+    hint = f"Name a Cloud Device with `rce device alias <id> {ref}`."  # glossary-ok
+    raise RceError(NOT_FOUND, f"no Device Name {ref!r}. {hint}")
+
+
+def naming_command(device_id: int) -> str:
+    """The command that gives a Cloud Device a Device Name, for messages."""
+    return f"`rce device alias {device_id} <name>`"  # glossary-ok: the command's name
+
+
+def require_device_name(ref: DeviceRef) -> str:
+    """The Cloud Device's Device Name, where rce keeps what it stores about it; exit 3 if none."""
+    if ref.name is None:
+        hint = f"Give it one with {naming_command(ref.id)}."
+        raise RceError(NOT_FOUND, f"Cloud Device {ref.id} has no Device Name. {hint}")
+    return ref.name
+
+
+# -- Core API ------------------------------------------------------------------
+
+
+RETRY_DELAYS = (0.5, 1.0, 2.0)  # seconds between attempts on a 429
+
+
+def is_gateway_rate_limit(response: httpx.Response) -> bool:
+    """The gateway's 429: the request never reached RCE, so any method may retry."""
+    return (
+        response.headers.get("x-local-rate-limit") == "true"
+        or "local_rate_limited" in response.text
+    )
+
+
+def error_code(response: httpx.Response) -> str | None:
+    """RCE's own code for an error, e.g. `trial_exhausted`, when the body has one."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    return detail.get("code") if isinstance(detail, dict) else None
+
+
+def error_message(response: httpx.Response) -> str:
+    """RCE's FastAPI error body as one line: `{"detail": str | {code, message} | [...]}`."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return response.text.strip()[:200]
+    if isinstance(detail, dict):
+        return ": ".join(str(detail[k]) for k in ("code", "message") if detail.get(k))
+    if isinstance(detail, list):
+        return "; ".join(str(item.get("msg", item)) for item in detail)
+    return str(detail or "")
+
+
+def exit_code_for(status: int, message: str) -> int:
+    if status == 404 or (status == 403 and not message):  # empty 403: not found or not yours
+        return NOT_FOUND
+    if 400 <= status < 500:
+        return REFUSED
+    return ERROR
+
+
+class CoreAPI:
+    def __init__(self):
+        token, self.token_source = load_token()
+        self.base = os.environ.get("RCE_API_URL", DEFAULT_API_URL).rstrip("/")
+        self.auth_header = {"Authorization": f"Bearer {token}"}  # never printed
+        self.http = httpx.Client(headers=self.auth_header, timeout=30)
+
+    def get(self, path: str, **params) -> object:
+        return self.request("GET", path, params=params)
+
+    def request(self, method: str, path: str, **kwargs) -> object:
+        """Call the Core API."""
+        return self.call(method, self.base + path, **kwargs)
+
+    def call(self, method: str, url: str, **kwargs) -> object:
+        """Call RCE at a full URL (a Run's Instance API too) and return its JSON."""
+        response = self.send(method, url, **kwargs)
+        if response.is_success:
+            return response.json() if response.content else None
+        raise self.error(response)
+
+    def send(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Send to RCE's own APIs at a full URL with the token and retries on a 429;
+        any status comes back."""
+        for delay in (*RETRY_DELAYS, None):
+            response = self.send_once(method, url, **kwargs)
+            retryable = is_gateway_rate_limit(response) or method == "GET"
+            if response.status_code != 429 or delay is None or not retryable:
+                break
+            time.sleep(delay)
+        return response
+
+    def send_once(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Send once, never retried: for a device's own traffic, whose answer could
+        carry the gateway's rate-limit markers. Any status comes back."""
+        try:
+            return self.http.request(method, url, **kwargs)
+        except httpx.TimeoutException:
+            raise RceError(TIMEOUT, f"RCE at {url} did not answer in time")
+        except httpx.HTTPError as error:
+            raise RceError(ERROR, f"cannot reach RCE at {url}: {type(error).__name__}")
+
+    def error(self, response: httpx.Response) -> RceError:
+        """RCE's error answer as an RceError with the matching exit code."""
+        status, message, code = response.status_code, error_message(response), error_code(response)
+        if status == 401:
+            exit_code, text = REFUSED, f"RCE rejected the token from {self.token_source} (401): {message}"
+        elif status == 429:
+            exit_code, text = REFUSED, f"RCE kept rate-limiting the request (429): {message}"
+        else:
+            exit_code, text = exit_code_for(status, message), f"RCE answered {status}: {message}"
+        return RceError(exit_code, text, code, status)
+
+
+# -- output --------------------------------------------------------------------
+
+
+# Run info fields rce may show. An allowlist, so the WebRTC credentials RCE
+# returns with a Run (janus_*) can never reach output.
+RUN_FIELDS = (
+    "id",
+    "created_at",
+    "started_at",
+    "running_at",
+    "max_runtime",
+    "snapshot_id",
+    "snapshot_name",
+    "firmware_version_id",
+)
+
+
+def device_summary(device: dict, device_name: str | None) -> dict:
+    run = device.get("running_device")
+    return {
+        "id": device["id"],
+        "device_name": device_name,
+        "name": device["name"],
+        "type": device["device_type"],
+        "status": device["status"],
+        "run": {key: run.get(key) for key in RUN_FIELDS} if run else None,
+    }
+
+
+DETAIL_FIELDS = ("created_at", "serial_number", "last_snapshot_id", "last_snapshot_name")
+
+
+def device_detail(device: dict, device_name: str | None) -> dict:
+    return device_summary(device, device_name) | {key: device[key] for key in DETAIL_FIELDS}
+
+
+def table(rows: list[list[str]]) -> str:
+    widths = [max(len(cell) for cell in column) for column in zip(*rows)]
+    return "\n".join(
+        "  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip()
+        for row in rows
+    )
+
+
+def iso(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def emit(args: argparse.Namespace, data: object, human: str) -> None:
+    print(json.dumps(data, indent=2) if args.json else human)
+
+
+def warn(message: str) -> None:
+    print(f"rce: warning: {message}", file=sys.stderr)
+
+
+# -- Runs ----------------------------------------------------------------------
+
+
+DEFAULT_MAX_RUNTIME = 3600  # seconds: a forgotten Run costs at most an hour
+DEFAULT_START_TIMEOUT = 300  # seconds; RCE takes about 80 s to running and input-ready
+DEFAULT_STOP_TIMEOUT = 120  # seconds; RCE takes about 1 s to shut down
+LOCK_OWNER_VAR = "RCE_LOCK_OWNER"  # optional: names who holds a device lock
+POLL_SECONDS = (0.25, 0.5, 1.0, 2.0)  # between polls while waiting; the last repeats
+# RCE bills per device-minute at AWS Marketplace's "Device Usage Minutes" price.
+# The API has no rate, so this is the one place it lives.
+USD_PER_MINUTE = 0.00333333
+
+
+@dataclass(frozen=True)
+class Run:
+    device: dict  # the Cloud Device's DeviceOut, status "running"
+    address: str  # this Run's Instance API base URL, from the Core API
+
+
+def lock_path(ref: DeviceRef) -> Path:
+    return config_path().parent / "locks" / f"{ref.id}.lock"
+
+
+def lock_holder(file) -> str:
+    """Who holds a device lock, from what its owner wrote in the lock file."""
+    file.seek(0)
+    try:
+        owner = json.loads(file.read())
+    except ValueError:  # the owner is between taking the lock and writing it
+        return "another rce command"
+    by = f", owner {owner['owner']}" if owner.get("owner") else ""
+    return f"`{owner['command']}` (pid {owner['pid']}{by}, since {owner['since']})"
+
+
+@contextmanager
+def device_lock(ref: DeviceRef, wait: bool):
+    """Hold the Cloud Device's lock while starting or stopping it.
+
+    An flock on a file under the per-user config directory: the OS releases it
+    when its owner exits, so a lock whose owner died is reclaimed by the next
+    caller. The file records the owner for the message a blocked caller sees.
+    """
+    path = lock_path(ref)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(os.open(path, os.O_RDWR | os.O_CREAT, 0o600), "r+") as file:
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            holder = f"{ref.display} is locked by {lock_holder(file)}"
+            if not wait:
+                raise RceError(REFUSED, f"{holder}. Pass --wait-lock to wait for it.")
+            print(f"rce: {holder}; waiting for it.", file=sys.stderr)
+            fcntl.flock(file, fcntl.LOCK_EX)
+        owner = {
+            "pid": os.getpid(),
+            "command": shlex.join(["rce", *sys.argv[1:]]),
+            "owner": os.environ.get(LOCK_OWNER_VAR) or None,
+            "since": iso(datetime.now(timezone.utc)),
+        }
+        file.seek(0)
+        file.truncate()
+        file.write(json.dumps(owner))
+        file.flush()
+        try:
+            yield
+        finally:
+            file.seek(0)
+            file.truncate()  # closing the file releases the lock
+
+
+def get_device(api: CoreAPI, ref: DeviceRef) -> dict:
+    return api.get(f"/devices/{ref.id}")
+
+
+def has_run(device: dict) -> bool:
+    """Whether a Cloud Device has a Run, pending or running: billing starts with the
+    start request."""
+    return device["status"] != "shutdown"
+
+
+def run_address(api: CoreAPI, device: dict) -> str | None:
+    """The Run's Instance API base URL, from the Core API's answer (None until running).
+
+    Live RCE gives it with https://; its spec says without, so a bare one takes
+    the Core API's scheme. WebSocket routes swap http for ws.
+    """
+    url = (device.get("running_device") or {}).get("instance_api_url")
+    if not url:
+        return None
+    return url.rstrip("/") if "://" in url else f"{urlsplit(api.base).scheme}://{url}"
+
+
+def require_run(device: dict, ref: DeviceRef) -> dict:
+    """The Cloud Device's active Run (pending or running); exit 4 if it has none."""
+    if not has_run(device) or not device.get("running_device"):
+        raise RceError(
+            REFUSED,
+            f"{ref.display} is not running. "
+            f"Start it with `rce device start {ref.arg}`.",
+        )
+    return device["running_device"]
+
+
+def current_run(api: CoreAPI, ref: DeviceRef) -> Run:
+    """The Cloud Device's running Run and its address, for commands that need one.
+
+    Exits 4 when the Cloud Device is not running, or is still starting.
+    """
+    device = get_device(api, ref)
+    require_run(device, ref)
+    address = run_address(api, device)
+    if device["status"] != "running" or address is None:
+        raise RceError(
+            REFUSED,
+            f"{ref.display} is still starting. Wait for it with "
+            f"`rce device status {ref.arg}` and try again.",
+        )
+    return Run(device, address)
+
+
+def poll(timeout: float, what: str, check, on_timeout=None) -> object:
+    """Call `check` until it returns something truthy; exit 5 after `timeout` seconds,
+    or raise what `on_timeout` makes of that error (a hint, another exit code)."""
+    deadline = time.monotonic() + timeout
+    for attempt in range(sys.maxsize):
+        result = check()
+        if result:
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            error = RceError(TIMEOUT, f"{what} after {timeout:g} s")
+            raise on_timeout(error) if on_timeout else error
+        time.sleep(min(POLL_SECONDS[min(attempt, len(POLL_SECONDS) - 1)], remaining))
+
+
+def wait_until_ready(api: CoreAPI, ref: DeviceRef, timeout: float) -> dict:
+    """Wait until the Run is running and takes remote input; exit 5 after `timeout`."""
+
+    last_error = []  # why the Run's Instance API last failed, for the timeout message
+
+    def ready() -> dict | None:  # no Run yet is "not ready": RCE may lag its own 202
+        device = get_device(api, ref)
+        address = run_address(api, device)
+        if device["status"] != "running" or not address:
+            return None
+        try:
+            answer = api.call("GET", f"{address}/api/v0/input/ready")
+        except RceError as error:
+            if error.code != ERROR:
+                raise
+            last_error[:] = [str(error)]  # it may still be coming up
+            return None
+        return device if answer.get("ready") else None
+
+    def with_last_error(error: RceError) -> RceError:
+        return RceError(TIMEOUT, f"{error} (last: {last_error[0]})") if last_error else error
+
+    return poll(timeout, f"{ref.display} was not ready", ready, with_last_error)
+
+
+def parse_time(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def local_time(moment: datetime) -> str:
+    return moment.astimezone().strftime("%H:%M")
+
+
+def usd(amount: float) -> str:
+    return f"${amount:.2f}"
+
+
+def run_report(device: dict, device_name: str | None) -> dict:
+    """`device list`'s view of a Cloud Device plus what its Run costs so far.
+
+    A Run's billing starts when the start is requested (its `created_at`), and
+    RCE stops it about `max_runtime` seconds after that.
+    """
+    report = device_summary(device, device_name) | {
+        "hourly_cost_usd": round(USD_PER_MINUTE * 60, 4),
+        "auto_stop_at": None,
+        "elapsed_s": None,
+        "elapsed_cost_usd": None,
+    }
+    run = report["run"]
+    if run is None:
+        return report
+    created = parse_time(run["created_at"])
+    elapsed = max(0, int((datetime.now(timezone.utc) - created).total_seconds()))
+    return report | {
+        "auto_stop_at": iso(created + timedelta(seconds=run["max_runtime"])),
+        "elapsed_s": elapsed,
+        "elapsed_cost_usd": round(elapsed / 60 * USD_PER_MINUTE, 4),
+    }
+
+
+def start_refusal(api: CoreAPI, error: RceError, ref: DeviceRef, body: dict) -> RceError:
+    """RCE's refusal of a start, in plain words saying what to do (exit 4)."""
+    if error.rce_code == "trial_device_run_limit":
+        names = device_names_by_id()
+        running = [
+            describe(d["id"], names.get(d["id"]) or d["name"])
+            for d in api.get("/devices", items=0)
+            if has_run(d)
+        ]
+        return RceError(
+            REFUSED,
+            "the RCE trial runs one Cloud Device at a time, and "
+            f"{', '.join(running) or 'another Cloud Device'} is running. "
+            "rce never stops it for you: stop it with `rce device stop <device>` "
+            "if you're done with it.",
+        )
+    messages = {
+        "trial_exhausted": "the RCE free trial is used up. Subscribe through AWS Marketplace "
+        "to keep starting Cloud Devices.",
+        "snapshot_not_ready": f"Snapshot {body['snapshot_id']} is not ready yet: RCE is still "
+        "saving it. Try again in a minute, or pick another with --snapshot.",
+        "trial_max_runtime_exceeded": f"--max-runtime {body['max_runtime']} s is more than the "
+        "trial time you have left. Lower it; `rce usage` shows the minutes left.",
+    }
+    if error.rce_code in messages:
+        return RceError(REFUSED, messages[error.rce_code])
+    if error.status == 400 and error.rce_code is None:  # RCE gives over-cap no code
+        most = api.get("/user/me")["organisation"]["max_project_runtime"]
+        if body["max_runtime"] > most:
+            return RceError(
+                REFUSED,
+                f"--max-runtime {body['max_runtime']} s is more than your organisation's "
+                f"maximum of {most} s ({most / 3600:g} h). Lower it.",
+            )
+    if error.code != REFUSED:
+        return error
+    return RceError(
+        REFUSED,
+        f"RCE refused to start {ref.display}: {error}. Check that --max-runtime "
+        "is within your organisation's maximum, --firmware fits the device type, and the "
+        "Cloud Device isn't already running or busy.",
+    )
+
+
+def stop_after_failed_start(api: CoreAPI, ref: DeviceRef) -> bool:
+    """A start that fails or is interrupted after RCE accepted it must not keep billing.
+    Whether nothing is left billing: the Run is stopped, or a stop that failed found
+    no Run (a start RCE never got)."""
+    name = ref.display
+    try:
+        stop_run(api, ref)
+    except RceError as error:
+        try:
+            billing = "is" if has_run(get_device(api, ref)) else None
+        except RceError:
+            billing = "may be"
+        if billing is None:
+            warn(f"{name} has no Run: the start didn't happen, or its Run already ended.")
+            return True
+        warn(
+            f"could not stop the Run of {name} ({error}). It {billing} billing: stop it with "
+            f"`rce device stop {ref.arg}`."
+        )
+        return False
+    warn(f"stopped the Run of {name} so it doesn't keep billing.")
+    return True
+
+
+def start_unanswered(api: CoreAPI, ref: DeviceRef, error: RceError) -> RceError:
+    """A start request that got no answer, which RCE may have accepted all the same. Any
+    Run it has now is this command's (it found none, under the lock), so it is stopped,
+    as it is when rce can't tell."""
+    try:
+        if not has_run(get_device(api, ref)):
+            return RceError(error.code, f"{error}. {ref.display} has no Run: the start didn't happen.")
+    except RceError as lookup:
+        stopped = stop_after_failed_start(api, ref)
+        outcome = "nothing is billing" if stopped else "a Run may be billing"
+        return RceError(
+            error.code,
+            f"{error}. rce could not check whether RCE started a Run anyway ({lookup}), "
+            f"so it asked RCE to stop one: {outcome}.",
+        )
+    outcome = "rce stopped it" if stop_after_failed_start(api, ref) else "it is still billing"
+    return RceError(error.code, f"{error}. RCE had started a Run anyway, and {outcome}.")
+
+
+def stop_run(
+    api: CoreAPI, ref: DeviceRef, wait: bool = False, timeout: float = DEFAULT_STOP_TIMEOUT
+) -> dict:
+    """Ask RCE to end the Cloud Device's Run; with `wait`, until it has shut down
+    (exit 5 after `timeout`). Returns the Cloud Device as RCE last gave it."""
+    device = api.request("POST", f"/devices/{ref.id}/stop")
+    if not wait:
+        return device
+    return poll(
+        timeout,
+        f"{ref.display} had not shut down",
+        lambda: not has_run(d := get_device(api, ref)) and d,
+    )
+
+
+def latest_firmware(api: CoreAPI, device_type: str) -> str:
+    """The newest firmware RCE offers for a device type, by its display version."""
+    versions = api.get("/firmwareVersions", device_type=device_type, items=0)
+    if not versions:
+        raise RceError(REFUSED, f"RCE offers no firmware for device type {device_type!r}")
+
+    def version(firmware: dict) -> list[int]:
+        return [int(n) for n in re.findall(r"\d+", firmware.get("display_name") or "")]
+
+    return max(versions, key=version)["firmware_version_id"]
+
+
+def live_snapshot_id(api: CoreAPI, ref: DeviceRef) -> int:
+    """The Snapshot RCE marks `live`: the Cloud Device's latest state, saved on every stop."""
+    snapshots = api.get(f"/devices/{ref.id}/snapshots", items=0)
+    live = next((s["id"] for s in snapshots if s.get("live")), None)
+    if live is None:
+        raise RceError(
+            NOT_FOUND,
+            f"{ref.display} has no live Snapshot. Pick one with --snapshot.",
+        )
+    return live
+
+
+def start_snapshot(api: CoreAPI, snapshot: int | None, ref: DeviceRef) -> int:
+    """--snapshot, else the Dev Snapshot, else the latest live state (with a warning).
+
+    The latest live state is the Snapshot RCE marks `live` (saved on every
+    stop), not the device's `last_snapshot_id`, which is the Snapshot its last
+    Run started from and may be the base: starting from that resets it.
+    """
+    if snapshot is not None:
+        return snapshot
+    dev = dev_snapshot_id(ref)
+    if dev is not None:
+        return dev
+    live = live_snapshot_id(api, ref)
+    warn(
+        f"{ref.display} has no Dev Snapshot; starting from its latest live "
+        f"state (Snapshot {live}). It may not be in developer mode."
+    )
+    return live
+
+
+# -- a running Cloud Device ----------------------------------------------------
+
+
+INPUT_READY_TIMEOUT = 60  # seconds; RCE takes input about 15 s after a Run is running
+
+
+def send_keys(api: CoreAPI, ref: DeviceRef, keys: list[str], delay: float = 0) -> None:
+    """Press remote keys in order on the Cloud Device's Run, once it takes input.
+
+    Uses the Instance API's input endpoint, which works before dev mode or ECP
+    is set up. `delay` is seconds between keys. Exits 4 if it isn't running.
+    """
+    current_run(api, ref)
+    address = run_address(api, wait_until_ready(api, ref, INPUT_READY_TIMEOUT))
+    for i, key in enumerate(keys):
+        if i and delay:
+            time.sleep(delay)
+        answer = api.call("POST", f"{address}/api/v0/input/keypress/{quote(key, safe='%')}")
+        status = (answer or {}).get("status_code", 200)  # the device's own answer to the key
+        if status != 200:
+            raise RceError(
+                REFUSED,
+                f"{ref.display} did not take key {key} "
+                f"({status}: {answer.get('status_message')})",
+            )
+
+
+def port_http(api: CoreAPI, run: Run, port: int, method: str, path: str, **kwargs) -> httpx.Response:
+    """Send an HTTP request to a device port (80 installer, 8060 ECP) through the
+    Run's port proxy. Bodies and the query string pass through; any status comes
+    back, for the caller to read (the device's own 401 or 403, say). Never retried:
+    the device's answer is not proof the request didn't reach it."""
+    return api.send_once(method, f"{run.address}/api/v0/ports/{port}/http/{path.lstrip('/')}", **kwargs)
+
+
+# Where a person sets "Control by mobile apps" on a Cloud Device, as the Player shows it.
+# Its choices: Enabled, Permissive, Disabled, Limited (the default, which refuses most ECP).
+MOBILE_APPS_SETTING = (
+    "Settings > System > Advanced system settings > Control by mobile apps > Network access"
+)
+
+
+def ecp(api: CoreAPI, ref: DeviceRef, path: str, method: str = "GET", **kwargs) -> str:
+    """Send an ECP command to the Cloud Device's Run and return the device's answer.
+
+    Exits 4 when it isn't running, or when its "Control by mobile apps" setting
+    refuses the command (ECP's 403); exits 3 on the device's own 404 (no such
+    command or app, e.g. launch/dev with no dev app installed).
+    """
+    response = port_http(api, current_run(api, ref), 8060, method, path, **kwargs)
+    if response.is_success:
+        return response.text
+    if response.status_code == 403:
+        raise RceError(
+            REFUSED,
+            f"{ref.display} refused ECP {path} "
+            f"(403: {response.text.strip()[:200] or 'no message'}). Its \"Control by mobile "
+            "apps\" setting is limited or disabled, or the command needs developer mode. Set it "
+            f"up with `rce device setup-dev {ref.arg}`, or by hand: {MOBILE_APPS_SETTING} > "
+            "Permissive.",
+        )
+    if response.status_code == 404 and not response.content:  # the proxy's own 404 has a body
+        why = (
+            f"no dev app is installed. Sideload one with `rce sideload {ref.arg} <file>`."
+            if urlsplit(path).path.strip("/") == "launch/dev"
+            else "no such command, or the app it names isn't installed."
+        )
+        raise RceError(NOT_FOUND, f"{ref.display} answered 404 to ECP {path}: {why}")
+    raise api.error(response)
+
+
+# -- the installer (port 80) ---------------------------------------------------
+
+# The device's dev web server: sideload and screenshots. It signs in with
+# Digest as `rokudev` and the Cloud Device's own Dev Password, and answers with
+# its page (200, or 400 for a failed install), so the page says what happened.
+INSTALLER_PORT = 80
+DEV_USER = "rokudev"
+DEV_PASSWORD_VAR = "RCE_DEV_PASSWORD"  # the Dev Password for pipelines, over a stored one
+INSTALL_TIMEOUT = 300  # seconds; the device answers once the package is installed
+
+
+class InstallerAuth(httpx.DigestAuth):
+    """Digest for the installer. Authorization carries the Digest on port 80, so
+    the RCE token moves to X-Authorization and never reaches the device."""
+
+    def auth_flow(self, request: httpx.Request):
+        request.headers["X-Authorization"] = request.headers.pop("Authorization")
+        yield from super().auth_flow(request)
+
+
+def stored_dev_password(name: str | None) -> str | None:
+    """The Dev Password stored with a Device Name (`device setup-dev` generates it), if any.
+    A Cloud Device with no Device Name has none stored."""
+    return device_entry(name).get("dev_password") if name else None
+
+
+def dev_password(ref: DeviceRef) -> str:
+    """The Cloud Device's Dev Password: $RCE_DEV_PASSWORD (for pipelines), else the one
+    stored with its Device Name; exit 4 if neither."""
+    password = os.environ.get(DEV_PASSWORD_VAR) or stored_dev_password(ref.name)
+    if not password:
+        if ref.name:
+            remedy = f"Set up dev mode with `rce device setup-dev {ref.name}`, which stores it,"
+        else:  # setup-dev stores it with a Device Name, so the Cloud Device needs one first
+            remedy = (
+                f"Give it a Device Name with {naming_command(ref.id)}, then set up dev mode "
+                "with `rce device setup-dev <name>`, which stores it,"
+            )
+        raise RceError(
+            REFUSED,
+            f"no Dev Password for {ref.display}: none is stored and {DEV_PASSWORD_VAR} isn't set. "
+            f"{remedy} or set {DEV_PASSWORD_VAR}.",
+        )
+    return password
+
+
+def installer_page(response: httpx.Response) -> bool:
+    """Whether an answer through the port proxy is the installer's own page: its 2xx,
+    or the 400 page it answers a failed install with (live, Roku OS 16.0.4)."""
+    content_type = response.headers.get("content-type", "")
+    return response.is_success or (
+        response.status_code == 400 and content_type.startswith("text/html")
+    )  # RCE's own errors are JSON
+
+
+@dataclass(frozen=True)
+class Installer:
+    """A running Cloud Device's installer, signed in with its Dev Password."""
+
+    api: CoreAPI
+    ref: DeviceRef
+    run: Run
+    auth: InstallerAuth
+
+    @classmethod
+    def open(cls, api: CoreAPI, ref: DeviceRef) -> Installer:
+        auth = InstallerAuth(DEV_USER, dev_password(ref))
+        return cls(api, ref, current_run(api, ref), auth)
+
+    def request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """The installer's page (`installer_page`); exit 4 if it refuses the Dev Password."""
+        response = port_http(
+            self.api, self.run, INSTALLER_PORT, method, path, auth=self.auth, **kwargs
+        )
+        if installer_page(response):
+            return response
+        if response.status_code == 401 and response.headers.get(
+            "www-authenticate", ""
+        ).lower().startswith("digest"):  # the device's own 401, not the gateway's
+            raise RceError(
+                REFUSED,
+                f"wrong or missing Dev Password for {self.ref.display}: its installer refused "
+                f"the one rce sent (401). Set dev mode up with `rce device setup-dev "
+                f"{self.ref.arg}`, or check {DEV_PASSWORD_VAR} if it is set.",
+            )
+        raise self.api.error(response)
+
+
+# How the Utilities page (plugin_inspect) renders a message, live on Roku OS 16.0.4.
+RENDERED_MESSAGE = re.compile(
+    r"\.trigger\('Set message type',\s*'(\w+)'\)\s*"
+    r"\.trigger\('Set message content',\s*'((?:\\.|[^'\\])*)'\)"
+)
+
+
+def installer_messages(page: str) -> list[dict]:
+    """The installer page's messages ({"text", "type"}): from a
+    JSON.parse('{"messages": [...]}') call, or rendered one by one as
+    Roku.Message's 'Set message type' and 'Set message content'."""
+    found = re.search(r"JSON\.parse\('(.*?)'\);", page, re.S)
+    try:
+        messages = list(json.loads(found[1])["messages"]) if found else []
+    except (ValueError, KeyError, TypeError):
+        messages = []
+    messages += [
+        {"type": kind, "text": re.sub(r"\\(.)", r"\1", text)}
+        for kind, text in RENDERED_MESSAGE.findall(page)
+    ]
+    return [m for m in messages if isinstance(m, dict) and m.get("text")]
+
+
+def install_outcome(page: str) -> tuple[str, str | None]:
+    """("installed" | "identical" | "failed", the installer's reason for a failure)."""
+    messages = installer_messages(page)
+    texts = " ".join(m["text"] for m in messages) or page
+    if "Identical to previous version" in texts:
+        return "identical", None
+    if "Install Success" in texts:
+        return "installed", None
+    errors = [m["text"] for m in messages if m.get("type") == "error"]
+    return "failed", "; ".join(errors or [m["text"] for m in messages]) or "it gave no reason"
+
+
+def install_app(installer: Installer, file: str, archive: bytes) -> str:
+    """Install an archive named `file`: "installed" or "identical"; exit 4 if it fails."""
+    page = installer.request(
+        "POST",
+        "plugin_install",
+        data={"mysubmit": "Install"},
+        files={"archive": (file, archive, "application/octet-stream")},
+        timeout=INSTALL_TIMEOUT,
+    ).text
+    outcome, reason = install_outcome(page)
+    if outcome == "failed":
+        ref = installer.ref
+        raise RceError(REFUSED, f"{ref.display} did not install {file}: {reason}")
+    return outcome
+
+
+SCREENSHOT_RETRY_SECONDS = 2  # like rk: the installer may take none just after a launch
+# Only the dev screenshot, with a query at most: the page is the device's, so
+# its link must not steer the token-bearing request anywhere else.
+SCREENSHOT_LINK = re.compile(r"""["'](pkgs/dev\.(?:jpg|png)(?:\?[^"'\s/]*)?)["']""")
+# The installer's Screenshot button, as its page posts it.
+SCREENSHOT_FORM = {"mysubmit": (None, "Screenshot"), "archive": (None, "")}
+
+
+def take_screenshot(installer: Installer) -> bytes:
+    """The installer's screenshot of the foreground dev app; exit 4 if there is none."""
+    last = []  # the installer's last page without a screenshot, for the message
+
+    def link() -> str | None:
+        page = installer.request("POST", "plugin_inspect", files=SCREENSHOT_FORM).text
+        found = SCREENSHOT_LINK.search(page)
+        last[:] = [page]
+        return found and found[1]
+
+    def no_dev_app(error: RceError) -> RceError:
+        ref = installer.ref
+        said = "; ".join(m["text"] for m in installer_messages(last[0])) or "no message"
+        return RceError(
+            REFUSED,
+            f"no dev app in the foreground on {ref.display}: its installer took "
+            f"no screenshot ({said}). Launch it with `rce launch {ref.arg}`.",
+        )
+
+    path = poll(SCREENSHOT_RETRY_SECONDS, "no screenshot", link, no_dev_app)
+    return installer.request("GET", path).content
+
+
+# -- Snapshots -----------------------------------------------------------------
+
+
+def dev_snapshot_id(ref: DeviceRef) -> int | None:
+    """The Dev Snapshot recorded with the Cloud Device's Device Name, if any."""
+    return device_entry(ref.name).get("dev_snapshot_id") if ref.name else None
+
+
+def snapshot_view(snapshot: dict, dev_id: int | None) -> dict:
+    """What rce shows of a SnapshotOut, and whether it is the Dev Snapshot."""
+    keys = ("id", "name", "created_at", "ready", "base", "live")
+    return {key: snapshot[key] for key in keys} | {"dev_snapshot": snapshot["id"] == dev_id}
+
+
+def ready_snapshot(api: CoreAPI, ref: DeviceRef, snapshot_id: int) -> dict:
+    """The Cloud Device's Snapshot, ready to start a Run: exit 3 if it has none by that id,
+    4 if RCE is still saving it."""
+    try:
+        snapshot = api.get(f"/devices/{ref.id}/snapshots/{snapshot_id}")
+    except RceError as error:
+        if error.code != NOT_FOUND:
+            raise
+        raise RceError(
+            NOT_FOUND,
+            f"{ref.display} has no Snapshot {snapshot_id}. "
+            f"See its Snapshots with `rce snapshot list {ref.arg}`.",
+        )
+    if not snapshot["ready"]:
+        raise RceError(
+            REFUSED,
+            f"Snapshot {snapshot_id} is not ready yet: RCE is still saving it. "
+            "Try again in a minute.",
+        )
+    return snapshot
+
+
+DEFAULT_SNAPSHOT_TIMEOUT = 600  # seconds; RCE saves a Snapshot in the background
+SNAPSHOT_NAME_LENGTH = range(3, 256)  # SnapshotCreate.name, so RCE's 422 means the limit
+
+
+def check_snapshot_name(name: str) -> None:
+    if len(name) not in SNAPSHOT_NAME_LENGTH:
+        raise RceError(USAGE, f"a Snapshot name is 3 to 255 characters, not {len(name)} ({name!r})")
+
+
+def take_snapshot(api: CoreAPI, ref: DeviceRef, name: str, timeout: float) -> dict:
+    """Take a Snapshot of the Cloud Device and wait until it is ready; exit 5 after `timeout`."""
+    return wait_for_snapshot(api, ref, request_snapshot(api, ref, name), timeout)
+
+
+def request_snapshot(api: CoreAPI, ref: DeviceRef, name: str) -> dict:
+    """Ask RCE for a Snapshot of the Cloud Device; exit 4 at its Snapshot limit.
+
+    RCE saves it in the background; with the Cloud Device off it saves the latest state.
+    """
+    check_snapshot_name(name)
+    try:
+        snapshot = api.request("POST", f"/devices/{ref.id}/snapshots", json={"name": name})
+    except RceError as error:
+        if error.status != 422:
+            raise
+        raise RceError(
+            REFUSED,
+            f"{ref.display} is at its Snapshot limit, so RCE took no Snapshot "
+            f"({error}). Delete one you no longer need on RCE (rce doesn't delete Snapshots), "
+            "then try again.",
+        )
+    return snapshot
+
+
+def wait_for_snapshot(api: CoreAPI, ref: DeviceRef, snapshot: dict, timeout: float) -> dict:
+    """Wait until RCE has saved a Snapshot it is taking; exit 5 after `timeout`."""
+    path = f"/devices/{ref.id}/snapshots/{snapshot['id']}"
+    return poll(
+        timeout,
+        f"Snapshot {snapshot['id']} ({snapshot['name']!r}) was not ready",
+        lambda: (s := api.get(path))["ready"] and s,
+        lambda error: RceError(
+            TIMEOUT,
+            f"{error}: RCE is still saving it. Check on it with `rce snapshot list {ref.arg}`.",
+        ),
+    )
+
+
+def update_device_entry(name: str, **fields: object) -> None:
+    """Change what the per-user config stores with a Device Name; None removes a field."""
+    config = load_config()
+    entry = config["devices"][name]
+    for key, value in fields.items():
+        if value is None:
+            entry.pop(key, None)
+        else:
+            entry[key] = value
+    save_config(config)
+
+
+def record_dev_snapshot(ref: DeviceRef, snapshot_id: int) -> None:
+    """Record the Dev Snapshot with the Cloud Device's Device Name; `device start` uses it."""
+    update_device_entry(require_device_name(ref), dev_snapshot_id=snapshot_id)
+
+
+def confirm(args: argparse.Namespace, question: str) -> None:
+    """Ask before a permanent action. Only --yes skips it; no terminal means no."""
+    if args.yes:
+        return
+    if not sys.stdin.isatty():
+        raise RceError(USAGE, "this needs confirmation: run it in a terminal or pass --yes")
+    print(f"{question} [y/N] ", end="", file=sys.stderr, flush=True)
+    if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+        raise RceError(USAGE, "cancelled")
+
+
+# -- dev setup -----------------------------------------------------------------
+
+# `device setup-dev` takes a fresh Cloud Device to a Dev Snapshot. Between
+# starting a Run (step 1) and stopping it (step 8) come these steps; each one
+# it completes is recorded with the Device Name, so a rerun resumes after it:
+#
+#   [devices.player]
+#   dev_password = "..."     # generated by setup-dev; the installer's rokudev password
+#
+#   [devices.player.setup_dev]
+#   done = ["account_link", "dev_mode"]
+#   snapshot_id = 1001       # once RCE is asked for it, so a rerun waits for that one
+SETUP_STEPS = ("account_link", "dev_mode", "mobile_apps", "verify", "snapshot", "dev_snapshot")
+RUN_STEPS = SETUP_STEPS[:4]  # the steps that need a Run; RCE takes a Snapshot either way
+DEV_SNAPSHOT_NAME = "dev-ready"
+DEV_PASSWORD_LENGTH = 16
+# Letters and digits without look-alikes (0/O, 1/l/I), for a person reading it
+# off the terminal with --show-password. 16 of them is about 93 bits.
+DEV_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+TYPING_DELAY = 0.1  # seconds between the keys that type the Dev Password
+RCE_DEVICES_PAGE = "https://developer.roku.com/cloud-emulator/devices"  # glossary-ok: its URL
+
+
+def guided_setup_problem(info: dict) -> str | None:
+    return "it is still in guided setup" if info.get("in-guided-setup") is True else None
+
+
+def dev_mode_problem(info: dict) -> str | None:
+    return None if info.get("developer-enabled") is True else "developer mode is off"
+
+
+def dev_mode_on_problem(info: dict) -> str | None:
+    return "developer mode is still on" if info.get("developer-enabled") is True else None
+
+
+def mobile_apps_problem(info: dict) -> str | None:
+    mode = info.get("ecp-setting-mode")
+    return f'"Control by mobile apps" is {mode}' if mode in ("limited", "disabled") else None
+
+
+# What step 5 checks in device-info, and the step that set each one up.
+VERIFIED = (
+    ("account_link", guided_setup_problem),
+    ("dev_mode", dev_mode_problem),
+    ("mobile_apps", mobile_apps_problem),
+)
+
+
+def note(message: str) -> None:
+    """Tell the person running setup-dev what is happening (stderr; stdout is the result)."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def show_dev_password(display: str, name: str | None) -> bool:
+    """Print a Cloud Device's stored Dev Password for a person (setup-dev --show-password,
+    device show --dev-password; never in --json). Whether it had one to show."""
+    password = stored_dev_password(name)
+    if password:
+        note(f"The Dev Password of {display} is: {password}")
+    return bool(password)
+
+
+class DevSetup:
+    """One run of `device setup-dev`: its steps, the Run they need, and the person it asks."""
+
+    def __init__(self, api: CoreAPI, ref: DeviceRef, args: argparse.Namespace):
+        self.api, self.ref, self.args = api, ref, args
+        self.name = require_device_name(ref)
+        self.display = ref.display
+        self.progress = device_entry(self.name).get("setup_dev", {"done": []})
+        self.running = False  # a Run is up and takes input
+        self.started = False  # this command started that Run
+        self.password_shown = False
+
+    @property
+    def password(self) -> str | None:
+        return stored_dev_password(self.name)
+
+    def save_progress(self) -> None:
+        update_device_entry(self.name, setup_dev=self.progress)
+
+    def run(self) -> None:
+        """Every step not done yet, in order, starting a Run when one needs it."""
+        for number, step in enumerate(SETUP_STEPS, start=2):
+            if step in self.progress["done"]:
+                continue
+            if step in RUN_STEPS and not self.running:
+                self.start()
+            getattr(self, step)(f"Step {number} of 8")
+            self.progress["done"].append(step)
+            self.save_progress()
+
+    # -- the Run ----------------------------------------------------------------
+
+    def start(self) -> None:
+        """Step 1: a Run from the Cloud Device's latest state, or the one it already has."""
+        if not has_run(get_device(self.api, self.ref)):
+            note(f"Step 1 of 8: starting a Run of {self.display} from its latest state.")
+            options = StartOptions(snapshot=live_snapshot_id(self.api, self.ref))
+            start_run(self.api, self.ref, options)  # it stops the Run if the wait fails
+            self.started = True
+        else:
+            note(f"Step 1 of 8: {self.display} is already running; setup-dev uses that Run.")
+            wait_until_ready(self.api, self.ref, DEFAULT_START_TIMEOUT)
+        self.running = True
+
+    def stop(self) -> bool:
+        """Step 8: stop the Run this command started, unless --keep-running. Whether it
+        stopped one; a Run that was already going keeps going, with a warning."""
+        if not self.running or self.args.keep_running:
+            return False
+        if not self.started:
+            warn(
+                f"{self.display} was already running when setup-dev began, so it is still "
+                f"running and billing: stop it with `rce device stop {self.name}`."
+            )
+            return False
+        stop_run(self.api, self.ref)
+        note(f"Step 8 of 8: stopped the Run of {self.display}.")
+        return True
+
+    def stop_after_failure(self) -> None:
+        """On a failure or Ctrl-C: stop the Run this command started, or say it is billing."""
+        if self.started and not self.args.keep_running:
+            stop_after_failed_start(self.api, self.ref)
+        elif self.running:
+            warn(
+                f"{self.display} is still running and billing. Rerun setup-dev to carry on, "
+                f"or stop it with `rce device stop {self.name}`."
+            )
+
+    # -- the person -------------------------------------------------------------
+
+    def device_info(self) -> dict:
+        return device_info(ecp(self.api, self.ref, "query/device-info"))
+
+    def check(self, problem) -> str | None:
+        """What device-info says is still to do (None: done). While the Cloud Device
+        restarts it may not answer, which also means not done yet."""
+        try:
+            return problem(self.device_info())
+        except RceError as error:
+            return f"it doesn't answer ECP yet ({error})"
+
+    def need_person(self, why: str) -> None:
+        """Exit 4 when no one is at a terminal to do a step only a person can do."""
+        if not sys.stdin.isatty():
+            raise RceError(
+                REFUSED,
+                f"setup-dev needs a person at a terminal for this step: on {self.display}, {why}. "
+                f"Run `rce device setup-dev {self.name}` in a terminal; it resumes from here.",
+            )
+
+    def press_enter(self, prompt: str) -> None:
+        print(prompt, end=" ", file=sys.stderr, flush=True)
+        if not sys.stdin.readline():
+            raise RceError(REFUSED, "the terminal closed before the step was done")
+
+    def human_step(self, problem, instructions: str, act=None) -> None:
+        """A step only a person can do: skipped when device-info shows it done; else
+        `act`, the instructions, and Enter until device-info shows it done."""
+        why = self.check(problem)
+        if why is None:
+            return
+        self.need_person(why)
+        if act:
+            act()
+        note(instructions)
+        prompt = "Press Enter here when that's done."
+        while why is not None:
+            self.press_enter(prompt)
+            why = self.check(problem)
+            if why is not None:
+                note(f"Not yet: {why}.")
+                prompt = "Press Enter to check again, or Ctrl-C to stop (a rerun resumes here)."
+
+    def show_password(self) -> None:
+        """--show-password: the Dev Password, once per run."""
+        if self.args.show_password and not self.password_shown:
+            self.password_shown = show_dev_password(self.display, self.name)
+
+    # -- the steps --------------------------------------------------------------
+
+    def account_link(self, step: str) -> None:
+        rce_name = get_device(self.api, self.ref)["name"]
+        self.human_step(
+            guided_setup_problem,
+            f"""
+{step}, the account link: only you can do this.
+  1. Open {RCE_DEVICES_PAGE}, find "{rce_name}" and click View device (the TV icon).
+  2. Go through guided setup with the virtual remote. Your computer keyboard types into
+     text fields.
+  3. When it asks you to activate the device, use the Roku account you develop with.
+     Roku emails an activation link to that account's address. Open it within 30 minutes:
+     after that the link expires and you have to start the activation again.
+  4. Carry on until the Cloud Device shows its Home screen.
+Ctrl-C stops the Run; rerun setup-dev to resume from this step.""",
+        )
+
+    def open_dev_settings(self) -> None:
+        """RCE's developer-settings shortcut presses the remote combo that opens the screen."""
+        address = current_run(self.api, self.ref).address
+        self.api.call("POST", f"{address}/api/v0/xi/developer-settings-combo")
+
+    def dev_mode(self, step: str) -> None:
+        on = dev_mode_problem(self.device_info()) is None
+        if on and self.password:
+            return  # set up by an earlier setup-dev, interrupted before it recorded the step
+        if on:  # with a Dev Password rce didn't set, so it couldn't sideload
+            self.human_step(
+                dev_mode_on_problem,
+                f"""
+{step}, developer mode: it is already on, with a Dev Password rce didn't set.
+rce opened Developer Settings on the Cloud Device. In the RCE web viewer, select
+"Disable installer and restart" and wait for the Cloud Device to restart.
+rce then turns developer mode on again with a Dev Password it keeps.""",
+                act=self.open_dev_settings,
+            )
+        self.need_person("developer mode is off")
+        if not self.password:
+            password = "".join(
+                secrets.choice(DEV_PASSWORD_ALPHABET) for _ in range(DEV_PASSWORD_LENGTH)
+            )
+            update_device_entry(self.name, dev_password=password)
+        self.open_dev_settings()
+        typist = "you type" if self.args.show_password else "rce types"
+        note(
+            f"""
+{step}, developer mode: rce opened Developer Settings on the Cloud Device.
+In the RCE web viewer:
+  1. Select "Enable installer and restart".
+  2. Read the Developer Tools License Agreement, scroll to its end and select "I Agree".
+  3. Stop at the screen that asks for a password, with its keyboard showing.
+     Type nothing yet: {typist} the Dev Password next."""
+        )
+        self.press_enter("Press Enter here when the password keyboard shows.")
+        if self.args.show_password:
+            self.show_password()
+            note("Type it on the keyboard in the RCE web viewer (it is case-sensitive).")
+        else:
+            send_keys(self.api, self.ref, [f"Lit_{c}" for c in self.password], TYPING_DELAY)
+            note(f"rce typed the Dev Password ({DEV_PASSWORD_LENGTH} characters).")
+        self.human_step(
+            dev_mode_problem,
+            f"""  4. Check the password field holds {DEV_PASSWORD_LENGTH} characters. If it doesn't, clear it,
+     press Ctrl-C here and rerun setup-dev with --show-password to type it yourself.
+  5. Select "Set password and reboot". The Cloud Device restarts in developer mode,
+     which takes a minute or two. Wait for its Home screen.""",
+        )
+
+    def mobile_apps(self, step: str) -> None:
+        self.human_step(
+            mobile_apps_problem,
+            f"""
+{step}, Control by mobile apps: rce can't change this setting itself, and until it is
+enabled the Cloud Device refuses ECP commands (403). In the RCE web viewer:
+  1. Press Home, then open {MOBILE_APPS_SETTING}.
+  2. Select Permissive (Enabled works too). Not Limited, the default, or Disabled.""",
+        )
+
+    def verify(self, step: str) -> None:
+        """The Cloud Device's own device-info, before a broken setup is saved."""
+        info = self.device_info()
+        failed = [(done, why) for done, problem in VERIFIED if (why := problem(info))]
+        if failed:
+            self.progress["done"] = [s for s in self.progress["done"] if s not in dict(failed)]
+            self.save_progress()
+            raise RceError(
+                REFUSED,
+                f"{step}: {self.display} isn't set up: {'; '.join(why for _, why in failed)}. "
+                f"setup-dev took no Snapshot. Rerun `rce device setup-dev {self.name}` to redo "
+                "those steps.",
+            )
+        note(f"{step}: {self.display} is in developer mode and takes ECP commands.")
+
+    def snapshot(self, step: str) -> None:
+        if "snapshot_id" not in self.progress:
+            snapshot = request_snapshot(self.api, self.ref, DEV_SNAPSHOT_NAME)
+            self.progress["snapshot_id"] = snapshot["id"]
+            self.save_progress()
+        snapshot = {"id": self.progress["snapshot_id"], "name": DEV_SNAPSHOT_NAME}
+        note(f"{step}: waiting for RCE to save Snapshot {snapshot['id']} ({DEV_SNAPSHOT_NAME!r}).")
+        wait_for_snapshot(self.api, self.ref, snapshot, DEFAULT_SNAPSHOT_TIMEOUT)
+
+    def dev_snapshot(self, step: str) -> None:
+        record_dev_snapshot(self.ref, self.progress["snapshot_id"])
+        note(f"{step}: Snapshot {self.progress['snapshot_id']} is the Dev Snapshot of {self.display}.")
+
+
+# -- WebSocket TCP bridges -----------------------------------------------------
+
+# A Run's TCP ports (console, debuggers) are reached through RCE's WebSocket
+# bridges. They carry binary frames only, both ways; RCE closes a bridge that
+# gets a text frame (1003), and frame boundaries are not preserved.
+CONSOLE_PORT = 8085
+
+
+def open_bridge(api: CoreAPI, run: Run, port: int, what: str) -> ClientConnection:
+    """A WebSocket to the Run's bridge for a device port, with the RCE token.
+
+    RCE's gateway refuses the upgrade with 502/503 when nothing listens on the
+    port, which for the console and debug ports means dev mode is off (exit 4).
+    """
+    url = "ws" + run.address.removeprefix("http") + f"/api/v0/ports/{port}"
+    try:
+        return ws_connect(
+            url,
+            additional_headers=api.auth_header,
+            open_timeout=30,
+            max_size=None,
+        )
+    except InvalidStatus as error:
+        status = error.response.status_code
+        if status in (502, 503):
+            raise RceError(
+                REFUSED,
+                f"{what} unavailable: is dev mode on? RCE's bridge to port {port} "
+                f"answered {status}. Set dev mode up with `rce device setup-dev <device>`.",
+            )
+        response = httpx.Response(status, content=error.response.body)
+        raise api.error(response)
+    except TimeoutError:
+        raise RceError(TIMEOUT, f"RCE's bridge at {url} did not answer in time")
+    except (OSError, InvalidHandshake) as error:
+        raise RceError(ERROR, f"cannot reach RCE's bridge at {url}: {type(error).__name__}")
+
+
+def bridge_closed(api: CoreAPI, ref: DeviceRef, what: str) -> RceError:
+    """Why RCE closed a bridge: the Run ended (exit 4), or something else (exit 1)."""
+    name = ref.display
+    if get_device(api, ref)["status"] != "running":
+        return RceError(REFUSED, f"the Run of {name} ended, closing the {what}.")
+    return RceError(ERROR, f"RCE closed the {what} of {name} while its Run is still running.")
+
+
+def as_bytes(frame: bytes | str) -> bytes:
+    """A bridge frame's bytes; RCE sends binary frames, but a text one is read too."""
+    return frame if isinstance(frame, bytes) else frame.encode()
+
+
+def bridge_lines(bridge: ClientConnection, deadline: float | None) -> Iterator[str]:
+    """Text lines from a bridge as each completes, until `deadline` (time.monotonic()).
+
+    Bytes are reassembled across frames before they're split into lines.
+    Raises ConnectionClosed when RCE closes the bridge.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+    while True:
+        timeout = None if deadline is None else deadline - time.monotonic()
+        if timeout is not None and timeout <= 0:
+            return
+        try:
+            frame = bridge.recv(timeout=timeout)
+        except TimeoutError:
+            return
+        pending += decoder.decode(as_bytes(frame))
+        *lines, pending = pending.split("\n")
+        yield from (line.removesuffix("\r") for line in lines)
+
+
+def console_lines(api: CoreAPI, ref: DeviceRef, run: Run, deadline: float | None) -> Iterator[str]:
+    """The Run's console, line by line as each completes, until `deadline`
+    (time.monotonic()); exit 4 if the Run ends while reading."""
+    with open_bridge(api, run, CONSOLE_PORT, "console") as console:
+        try:
+            yield from bridge_lines(console, deadline)
+        except ConnectionClosed:
+            raise bridge_closed(api, ref, "console")
+
+
+# Ports `forward` bridges: the SceneGraph debug server, both BrightScript
+# debugger ports, the console, the screensaver debug port and the TypeScript
+# debugger. 80 and 8060 are HTTP only on RCE.
+FORWARD_PORTS = (8080, 8081, 8082, 8085, 8087, 9999)
+HTTP_ONLY_PORTS = {80: "sideload", 8060: "ecp"}
+RUN_CHECK_SECONDS = 5.0  # how often an idle `forward` asks whether its Run ended
+
+
+def send_to_bridge(client: socket.socket, bridge: ClientConnection, hung_up: threading.Event):
+    """Send what a local client writes to the bridge, as binary frames, until it hangs up."""
+    try:
+        while data := client.recv(65536):
+            bridge.send(data)
+    except (OSError, ConnectionClosed):
+        pass
+    hung_up.set()
+    bridge.close()
+
+
+def forward_connection(
+    api: CoreAPI, ref: DeviceRef, run: Run, port: int, client: socket.socket, ended: queue.Queue
+) -> None:
+    """Bridge one local TCP client to the Run's port, both ways, until either side closes.
+
+    When RCE closes the bridge (or won't open it) because the Run ended, that
+    goes on `ended`; any other failure is a warning and `forward` keeps going.
+    """
+    what = f"forward to port {port}"
+    with client:
+        try:
+            bridge = open_bridge(api, run, port, what)
+        except RceError as error:
+            failure = error
+        else:
+            hung_up = threading.Event()
+            with bridge:
+                threading.Thread(
+                    target=send_to_bridge, args=(client, bridge, hung_up), daemon=True
+                ).start()
+                try:
+                    for frame in bridge:
+                        client.sendall(as_bytes(frame))
+                except OSError:
+                    return  # the local client is gone
+                except ConnectionClosed:
+                    pass
+            if hung_up.is_set():
+                return
+            with suppress(OSError):
+                client.shutdown(socket.SHUT_RDWR)  # wakes send_to_bridge
+            failure = None
+        try:
+            closed = bridge_closed(api, ref, what)
+        except RceError as error:
+            closed = error
+        if closed.code == REFUSED:
+            ended.put(closed)
+        else:
+            warn(str(failure or closed))
+
+
+def start_forwarding(
+    api: CoreAPI, ref: DeviceRef, run: Run, port: int, server: socket.socket
+) -> queue.Queue[RceError]:
+    """Bridge each client `server` accepts to the Run's port, in the background.
+
+    Returns the queue on which a connection reports that the Run ended.
+    """
+    ended: queue.Queue[RceError] = queue.Queue()
+
+    def accept() -> None:
+        while True:
+            try:
+                client, _ = server.accept()
+            except OSError:
+                return  # the server was closed
+            threading.Thread(
+                target=forward_connection, args=(api, ref, run, port, client, ended), daemon=True
+            ).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+    return ended
+
+
+# -- commands ------------------------------------------------------------------
+
+
+def cmd_token_set(args: argparse.Namespace) -> None:
+    if args.argument:  # never echo it back: it is a token already in the shell history
+        raise RceError(
+            USAGE,
+            "`rce token set` takes no arguments, so the token stays out of your shell history. "
+            "Type it at the hidden prompt or pipe it on stdin.",
+        )
+    if sys.stdin.isatty():
+        token = getpass.getpass("RCE token (input hidden): ").strip()
+    else:
+        token = sys.stdin.read().strip()
+    if not token:
+        raise RceError(USAGE, "no token given; rk's config file is unchanged.")
+    path = store_token(token)
+    emit(args, {"path": str(path)}, f"Stored the RCE token in {path}.")
+
+
+def cmd_token_status(args: argparse.Namespace) -> None:
+    token, source = load_token()
+    claims, now = token_claims(token), datetime.now(timezone.utc)
+    expiry, token_owner_id = token_expiry(claims), token_owner(claims)
+    if expiry and expiry <= now:
+        raise RceError(REFUSED, f"the RCE token from {source} expired on {iso(expiry)}. {RENEW}")
+    days_left = (expiry - now).days if expiry else None
+    if days_left is not None and days_left < EXPIRY_WARNING_DAYS:
+        warn(
+            f"the RCE token from {source} expires in {days_left} days, "
+            f"on {iso(expiry)}. {RENEW}"
+        )
+    api = CoreAPI()
+    user, trial = api.get("/user/me"), api.get("/usage/trial-status")
+    minutes = trial["trial"]
+    status = {
+        "source": source,
+        "owner": {key: user[key] for key in ("id", "username", "full_name", "email")},
+        "token_owner_id": token_owner_id,
+        "organisation": user["organisation"]["name"],
+        "expires_at": iso(expiry) if expiry else None,
+        "days_left": days_left,
+        "plan_status": trial["plan_status"],
+        "trial_minutes_left": (
+            max(0, minutes["mins_limit"] - minutes["mins_used"]) if minutes else None
+        ),
+    }
+    owner = status["owner"]
+    if token_owner_id == owner["id"]:
+        locally = "the token's own owner id matches"
+    else:
+        locally = f"the token itself names {token_owner_id or 'no owner'}"
+    rows = [
+        ["Owner:", f"{owner['full_name'] or owner['username']} <{owner['email'] or '-'}>"],
+        ["Owner id:", f"{owner['id']} ({locally})"],
+        ["Organisation:", status["organisation"]],
+        [
+            "Expires:",
+            f"{status['expires_at']} (in {status['days_left']} days)"
+            if expiry
+            else "unknown (the token carries no expiry)",
+        ],
+        [
+            "Trial:",
+            f"{status['trial_minutes_left']} of {minutes['mins_limit']} minutes left"
+            if minutes
+            else "ended (subscribed)",
+        ],
+        ["Source:", source],
+    ]
+    emit(args, status, table(rows))
+
+
+def cmd_device_list(args: argparse.Namespace) -> None:
+    names = device_names_by_id()
+    devices = [device_summary(d, names.get(d["id"])) for d in CoreAPI().get("/devices", items=0)]
+    if args.running:
+        devices = [d for d in devices if has_run(d)]
+    if not devices:
+        return emit(args, [], "No running Cloud Devices." if args.running else "No Cloud Devices.")
+    rows = [["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN"]] + [
+        [
+            str(d["id"]),
+            d["device_name"] or "-",
+            d["name"],
+            d["type"],
+            d["status"],
+            f"since {d['run']['created_at']}" if d["run"] else "-",
+        ]
+        for d in devices
+    ]
+    emit(args, devices, table(rows))
+
+
+def cmd_device_show(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    if args.dev_password and not stored_dev_password(ref.name):  # refused before any API call
+        raise RceError(REFUSED, f"no Dev Password is stored for {ref.display}.")
+    d = device_detail(CoreAPI().get(f"/devices/{ref.id}"), ref.name)
+    if args.dev_password:  # only once RCE has answered for the Cloud Device
+        show_dev_password(ref.display, ref.name)
+    run, snapshot = d["run"], d["last_snapshot_id"]
+    rows = [
+        ["ID:", str(d["id"])],
+        ["Device Name:", d["device_name"] or "-"],
+        ["RCE name:", d["name"]],
+        ["Type:", d["type"]],
+        ["Status:", d["status"]],
+        ["Run:", f"{run['id']} since {run['created_at']}" if run else "-"],
+        ["Created:", d["created_at"]],
+        ["Serial number:", d["serial_number"] or "-"],
+        ["Last Snapshot:", f"{snapshot} ({d['last_snapshot_name']})" if snapshot else "-"],
+    ]
+    emit(args, d, table(rows))
+
+
+def cmd_device_alias(args: argparse.Namespace) -> None:
+    check_device_name(args.name)
+    device = CoreAPI().get(f"/devices/{resolve_device(args.device).id}")
+    config = load_config()
+    names = config.setdefault("devices", {})
+    holder = names.get(args.name, {}).get("id", device["id"])
+    if holder != device["id"] and not args.force:
+        raise RceError(USAGE, f"{name_taken(args.name, holder)} Pass --force to move it.")
+    # One Device Name per Cloud Device: renaming keeps the fields stored with it.
+    old = next((name for name, entry in names.items() if entry["id"] == device["id"]), None)
+    entry = names.pop(old) if old else {}
+    names[args.name] = {**entry, "id": device["id"], "type": device["device_type"]}
+    save_config(config)
+    emit(
+        args,
+        {"id": device["id"], "device_name": args.name, "type": device["device_type"]},
+        f"Cloud Device {device['id']} ({device['name']}) now has Device Name {args.name!r}.",
+    )
+
+
+def cmd_device_resolve(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.name)
+    name = require_device_name(ref)
+    entry = device_entry(name)
+    emit(args, {"id": ref.id, "type": entry["type"]}, str(ref.id))
+
+
+@dataclass(frozen=True)
+class StartOptions:
+    """How to start a Run: `device start`'s flags, and their defaults."""
+
+    snapshot: int | None = None  # None: the Dev Snapshot, else the latest live state
+    firmware: str | None = None  # None: the latest for the device type
+    max_runtime: int = DEFAULT_MAX_RUNTIME
+    wait: bool = True  # until the Run takes input
+    timeout: float = DEFAULT_START_TIMEOUT
+
+
+def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
+    """Ask RCE for a Run and, with `options.wait`, wait until it takes input."""
+    device = get_device(api, ref)
+    if has_run(device):
+        raise RceError(
+            REFUSED,
+            f"{ref.display} is already {device['status']}. "
+            f"See it with `rce device status {ref.arg}`.",
+        )
+    body = {
+        "snapshot_id": start_snapshot(api, options.snapshot, ref),
+        "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
+        "max_runtime": options.max_runtime,
+    }
+    try:
+        try:
+            device = api.request("POST", f"/devices/{ref.id}/start", json=body)
+        except RceError as error:
+            if error.status is None:  # no answer from RCE
+                raise start_unanswered(api, ref, error)
+            raise start_refusal(api, error, ref, body)
+        if not options.wait:
+            return device
+        try:
+            return wait_until_ready(api, ref, options.timeout)
+        except Exception:  # the Run must not keep billing
+            stop_after_failed_start(api, ref)
+            raise
+    except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
+        stop_after_failed_start(api, ref)  # Stop first: a check could race RCE accepting it.
+        raise
+
+
+def cmd_device_start(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    api = CoreAPI()
+    with device_lock(ref, args.wait_lock):
+        options = StartOptions(
+            args.snapshot, args.firmware, args.max_runtime, not args.no_wait, args.timeout
+        )
+        report = run_report(start_run(api, ref, options), ref.name)
+    state = "is running" if report["status"] == "running" else "is starting"
+    emit(
+        args,
+        report,
+        f"{ref.display} {state}: Run {report['run']['id']}, "
+        f"{usd(report['hourly_cost_usd'])}/h, "
+        f"auto-stops around {local_time(parse_time(report['auto_stop_at']))}. "
+        f"Stop it with `rce device stop {ref.arg}`.",
+    )
+
+
+def cmd_usage(args: argparse.Namespace) -> None:
+    api = CoreAPI()
+    status = api.get("/usage/trial-status")
+    usage = {"plan_status": status["plan_status"], "trial": None, "billed": None}
+    trial = status["trial"]
+    if trial:  # still on the trial, or it ran out without a subscription
+        left = max(0, trial["mins_limit"] - trial["mins_used"])
+        usage["trial"] = {**trial, "mins_left": left}
+        human = f"Trial: {trial['mins_used']} of {trial['mins_limit']} min used, {left} min left."
+        if status["plan_status"] == "exhausted":
+            human = (
+                f"Trial used up: {trial['mins_used']} of {trial['mins_limit']} min. "
+                "Subscribe through AWS Marketplace to keep using RCE."
+            )
+    else:  # subscribed: RCE bills by the minute
+        now = datetime.now(timezone.utc)
+        month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        buckets = api.get("/usage/user", start=iso(month), end=iso(now), interval="1mo")
+        minutes = sum(bucket["value"] for bucket in buckets["buckets"])
+        cost = round(minutes * USD_PER_MINUTE, 4)
+        usage["billed"] = {"start": iso(month), "end": iso(now), "minutes": minutes, "cost_usd": cost}
+        human = f"Billed since {month:%Y-%m-%d}: {minutes} min, about {usd(cost)}."
+    emit(args, usage, human)
+
+
+def cmd_device_status(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    report = run_report(get_device(CoreAPI(), ref), ref.name)
+    run = report["run"]
+    rows = [["Cloud Device:", ref.display], ["Status:", report["status"]]]
+    if run:
+        created, auto_stop = parse_time(run["created_at"]), parse_time(report["auto_stop_at"])
+        rows += [
+            ["Run:", str(run["id"])],
+            ["Run started:", f"{iso(created)} ({local_time(created)} local)"],
+            ["Cap:", f"{run['max_runtime'] // 60} min, auto-stops around {local_time(auto_stop)}"],
+            [
+                "Elapsed:",
+                f"{report['elapsed_s'] // 60} min, about {usd(report['elapsed_cost_usd'])} "
+                f"at {usd(report['hourly_cost_usd'])}/h",
+            ],
+        ]
+    else:
+        rows.append(["Run:", "-"])
+    emit(args, report, table(rows))
+
+
+def cmd_device_stop(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    name = ref.display
+    api = CoreAPI()
+    with device_lock(ref, args.wait_lock):
+        device = get_device(api, ref)
+        require_run(device, ref)
+        report = run_report(device, ref.name)  # the Run being stopped
+        device = stop_run(api, ref, args.wait, args.timeout)
+    report["status"] = device["status"]
+    minutes = report["elapsed_s"] // 60
+    done = "It is shut down." if args.wait else "It shuts down in the background."
+    emit(
+        args,
+        report,
+        f"Stopped {name}: Run {report['run']['id']} ran {minutes} min, "
+        f"about {usd(report['elapsed_cost_usd'])}. {done}",
+    )
+
+
+def cmd_device_create(args: argparse.Namespace) -> None:
+    check_device_name(args.name)
+    if args.name in (names := device_entries()):
+        raise RceError(USAGE, name_taken(args.name, names[args.name]["id"]))
+    api = CoreAPI()
+    if not args.yes:
+        org = api.get("/user/me")["organisation"]
+        used = sum(org["current_devices"].values())
+        confirm(
+            args,
+            f"Create a {args.type} Cloud Device named {args.name!r}? "
+            f"Your org has {used}/{org['max_devices']} Cloud Devices. "
+            "The new one is permanent, cannot be deleted, and uses quota for good.",
+        )
+    device = api.request("POST", "/devices", json={"name": args.name, "device_type": args.type})
+    config = load_config()
+    config.setdefault("devices", {})[args.name] = {"id": device["id"], "type": args.type}
+    save_config(config)
+    emit(
+        args,
+        {"id": device["id"], "device_name": args.name, "type": args.type},
+        f"Created Cloud Device {device['id']} ({args.type}) with Device Name {args.name!r}.",
+    )
+
+
+RETIRED_PREFIX = "retired/"
+
+
+def cmd_device_retire(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    api = CoreAPI()
+    device = api.get(f"/devices/{ref.id}")
+    if device["name"].startswith(RETIRED_PREFIX):
+        raise RceError(
+            USAGE, f"Cloud Device {ref.id} is already retired (named {device['name']!r})."
+        )
+    if has_run(device):
+        raise RceError(
+            REFUSED,
+            f"Cloud Device {ref.id} is {device['status']}. Stop its Run before retiring it.",
+        )
+    name = RETIRED_PREFIX + device["name"]
+    named = f" (Device Name {ref.name!r})" if ref.name else ""
+    confirm(
+        args,
+        f"Retire Cloud Device {ref.id}, {device['name']!r}{named}? It is renamed {name!r} "
+        "on RCE and loses its Device Name. It cannot be deleted, so it still counts "
+        "against your quota.",
+    )
+    api.request("PATCH", f"/devices/{ref.id}", json={"name": name})
+    if ref.name:
+        config = load_config()
+        del config["devices"][ref.name]
+        save_config(config)
+    emit(args, {"id": ref.id, "name": name}, f"Retired Cloud Device {ref.id} as {name!r}.")
+
+
+def cmd_device_setup_dev(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    name = require_device_name(ref)
+    progress = device_entry(name).get("setup_dev", {"done": []})
+    if not args.restart and set(progress["done"]) >= set(SETUP_STEPS):
+        if args.show_password:
+            show_dev_password(ref.display, name)
+        return emit(
+            args,
+            {"id": ref.id, "device_name": name, "dev_snapshot_id": dev_snapshot_id(ref), "stopped_run": False},
+            f"{ref.display} is already set up: its Dev Snapshot is "
+            f"{dev_snapshot_id(ref)}. Pass --restart to go through setup-dev again.",
+        )
+    if not args.yes and not sys.stdin.isatty():  # no one to confirm or do the person's steps
+        raise RceError(
+            REFUSED,
+            f"setup-dev needs a person at a terminal: it asks first, and on {ref.display} "
+            f"some steps only a person can do. Run `rce device setup-dev {name}` in a terminal.",
+        )
+    api = CoreAPI()
+    confirm(
+        args,
+        f"Set up {ref.display} for development? setup-dev starts a Run "
+        f"({usd(USD_PER_MINUTE * 60)}/h, capped at {DEFAULT_MAX_RUNTIME // 60} min), pauses where "
+        f"you must act, and saves the result as a Snapshot named {DEV_SNAPSHOT_NAME!r} that "
+        "becomes its Dev Snapshot.",
+    )
+    if args.restart:
+        update_device_entry(name, setup_dev=None)  # the Dev Password stays: the device may have it
+    setup = DevSetup(api, ref, args)
+    with device_lock(ref, args.wait_lock):
+        try:
+            setup.run()
+        except BaseException:  # a failure or Ctrl-C: the Run must not keep billing
+            setup.stop_after_failure()
+            raise
+        stopped = setup.stop()
+    setup.show_password()
+    snapshot = dev_snapshot_id(ref)
+    left = (
+        f"Its Run is still going: stop it with `rce device stop {name}`."
+        if setup.running and not stopped
+        else f"`rce device start {name}` now starts from it."
+    )
+    emit(
+        args,
+        {"id": ref.id, "device_name": name, "dev_snapshot_id": snapshot, "stopped_run": stopped},
+        f"{ref.display} is set up for development: Dev Snapshot {snapshot} "
+        f"({DEV_SNAPSHOT_NAME!r}), Dev Password stored in {config_path()}. {left}",
+    )
+
+
+def cmd_key(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    send_keys(CoreAPI(), ref, args.keys, args.delay / 1000)
+    emit(
+        args,
+        {"id": ref.id, "device_name": ref.name, "keys": args.keys},
+        f"Pressed {' '.join(args.keys)} on {ref.display}.",
+    )
+
+
+def ecp_elements(xml: str) -> list[ElementTree.Element]:
+    """The top-level elements of an ECP answer."""
+    try:
+        return list(ElementTree.fromstring(xml))
+    except ElementTree.ParseError as error:
+        raise RceError(ERROR, f"the device's ECP answer is not XML ({error})")
+
+
+def device_info(xml: str) -> dict:
+    """ECP query/device-info as {field: value}; "true" and "false" become booleans."""
+    text = {e.tag: (e.text or "").strip() for e in ecp_elements(xml)}
+    return {tag: {"true": True, "false": False}.get(value, value) for tag, value in text.items()}
+
+
+def active_app(xml: str) -> dict:
+    """ECP query/active-app as {"app": {"name", "id", ...}}, plus "screensaver" when one shows.
+
+    On the Home screen the app is {"name": "Roku"} with no id.
+    """
+    return {e.tag: {"name": (e.text or "").strip(), **e.attrib} for e in ecp_elements(xml)}
+
+
+ECP_SUMMARIES = {"query/device-info": device_info, "query/active-app": active_app}
+
+
+def cmd_ecp(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    answer = ecp(CoreAPI(), ref, args.path, args.method)
+    summary = ECP_SUMMARIES.get(urlsplit(args.path).path.strip("/"))
+    data = summary(answer) if args.json and summary else {"path": args.path, "body": answer}
+    emit(args, data, answer.rstrip("\n"))
+
+
+def launch_param(text: str) -> tuple[str, str]:
+    key, sep, value = text.partition("=")
+    if not sep or not key:
+        raise argparse.ArgumentTypeError(f"expected key=value, got {text!r}")
+    return key, value
+
+
+def cmd_launch(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    ecp(CoreAPI(), ref, "launch/dev", "POST", params=args.params)
+    shown = " ".join(f"{key}={value}" for key, value in args.params)
+    emit(
+        args,
+        {"id": ref.id, "device_name": ref.name, "params": dict(args.params)},
+        f"Launched the dev app on {ref.display}" + (f": {shown}" if shown else "."),
+    )
+
+
+def read_file(path: str) -> bytes:
+    try:
+        return Path(path).read_bytes()
+    except OSError as error:
+        raise RceError(USAGE, f"cannot read {path}: {error.strerror or type(error).__name__}")
+
+
+def cmd_sideload(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    archive = read_file(args.file)
+    name, file = ref.display, Path(args.file).name
+    outcome = install_app(Installer.open(CoreAPI(), ref), file, archive)
+    human = {
+        "installed": f"Installed {file} on {name}.",
+        "identical": f"{name} already has {file} installed (identical); nothing changed.",
+    }[outcome]
+    data = {"id": ref.id, "device_name": ref.name, "file": args.file, "outcome": outcome}
+    emit(args, data, human)
+
+
+def cmd_screenshot(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    jpeg = take_screenshot(Installer.open(CoreAPI(), ref))
+    path = Path(args.output).absolute()
+    try:
+        path.write_bytes(jpeg)
+    except OSError as error:
+        raise RceError(USAGE, f"cannot write {args.output}: {error.strerror or type(error).__name__}")
+    emit(
+        args,
+        {"id": ref.id, "device_name": ref.name, "path": str(path), "bytes": len(jpeg)},
+        f"Saved a screenshot of {ref.display} to {args.output} ({len(jpeg)} bytes).",
+    )
+
+
+def cmd_device_delete(args: argparse.Namespace) -> None:
+    raise RceError(
+        USAGE,
+        "RCE can't delete Cloud Devices: every one counts against the quota for good. "
+        "Use `rce device retire <device>` to rename it as retired and drop its Device Name.",
+    )
+
+
+MARKS = (("base", "base"), ("live", "live"), ("dev_snapshot", "dev"))  # list's flag columns
+
+
+def cmd_snapshot_list(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    dev = dev_snapshot_id(ref)
+    snapshots = [
+        snapshot_view(s, dev) for s in CoreAPI().get(f"/devices/{ref.id}/snapshots", items=0)
+    ]
+    rows = [["ID", "NAME", "CREATED", "READY", "BASE", "LIVE", "DEV"]] + [
+        [str(s["id"]), s["name"], s["created_at"], "yes" if s["ready"] else "no"]
+        + [word if s[key] else "-" for key, word in MARKS]
+        for s in snapshots
+    ]
+    emit(args, snapshots, table(rows))
+
+
+def cmd_snapshot_take(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    check_snapshot_name(args.snapshot_name)
+    confirm(
+        args,
+        f"Take a Snapshot named {args.snapshot_name!r} of {ref.display}? "
+        "It counts toward the Cloud Device's Snapshot limit until it is deleted on RCE, "
+        "which rce doesn't do.",
+    )
+    snapshot = take_snapshot(CoreAPI(), ref, args.snapshot_name, args.timeout)
+    emit(
+        args,
+        snapshot_view(snapshot, dev_snapshot_id(ref)),
+        f"Took Snapshot {snapshot['id']} ({snapshot['name']!r}) of "
+        f"{ref.display}; it is ready. Make it the Dev Snapshot with "
+        f"`rce snapshot use-as-dev {ref.arg} {snapshot['id']}`.",
+    )
+
+
+def cmd_snapshot_use_as_dev(args: argparse.Namespace) -> None:
+    ref = resolve_device(args.device)
+    name = require_device_name(ref)
+    snapshot = ready_snapshot(CoreAPI(), ref, args.snapshot)
+    old = dev_snapshot_id(ref)
+    replaces = f" It replaces Snapshot {old}." if old is not None else ""
+    confirm(
+        args,
+        f"Make Snapshot {snapshot['id']} ({snapshot['name']!r}) the Dev Snapshot of "
+        f"{ref.display}? `rce device start` starts from it by default.{replaces}",
+    )
+    record_dev_snapshot(ref, snapshot["id"])
+    emit(
+        args,
+        {"id": ref.id, "device_name": name, "dev_snapshot_id": snapshot["id"]},
+        f"Snapshot {snapshot['id']} ({snapshot['name']!r}) is now the Dev Snapshot of "
+        f"{ref.display}.",
+    )
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def cmd_console(args: argparse.Namespace) -> None:
+    try:
+        until = re.compile(args.until) if args.until is not None else None
+    except re.error as error:
+        raise RceError(USAGE, f"--until is not a valid regex: {error}")
+    ref = resolve_device(args.device)
+    api = CoreAPI()
+    run = current_run(api, ref)
+    deadline = None if args.timeout is None else time.monotonic() + args.timeout
+    for line in console_lines(api, ref, run, deadline):
+        if args.strip_ansi:
+            line = ANSI_ESCAPE.sub("", line)
+        matched = until is not None and until.search(line) is not None
+        shown = json.dumps({"line": line, "matched": matched}) if args.json else line
+        print(shown, flush=True)
+        if matched:
+            return
+    if until is not None:
+        raise RceError(TIMEOUT, f"no console line matched {args.until!r} in {args.timeout:g} s")
+    raise RceError(TIMEOUT, f"stopped reading the console after {args.timeout:g} s")
+
+
+def cmd_forward(args: argparse.Namespace) -> None:
+    if args.port in HTTP_ONLY_PORTS:
+        raise RceError(
+            USAGE,
+            f"port {args.port} is HTTP only on RCE, so it can't be forwarded: "
+            f"use `rce {HTTP_ONLY_PORTS[args.port]}`.",
+        )
+    if args.port not in FORWARD_PORTS:
+        ports = ", ".join(map(str, FORWARD_PORTS))
+        raise RceError(USAGE, f"port {args.port} can't be forwarded; RCE bridges {ports}.")
+    local = args.port if args.local is None else args.local
+    ref = resolve_device(args.device)
+    api = CoreAPI()
+    run = current_run(api, ref)
+    what = f"forward to port {args.port}"
+    try:
+        server = socket.create_server(("127.0.0.1", local))
+    except OSError as error:
+        raise RceError(
+            USAGE, f"cannot listen on 127.0.0.1:{local}: {error.strerror}. Pick another --local."
+        )
+    with server:
+        local = server.getsockname()[1]
+        emit(
+            args,
+            {"id": ref.id, "device_name": ref.name, "port": args.port, "local": local},
+            f"Forwarding 127.0.0.1:{local} to port {args.port} of "
+            f"{ref.display}. Press Ctrl-C to stop.",
+        )
+        sys.stdout.flush()
+        ended = start_forwarding(api, ref, run, args.port, server)
+        while True:  # until interrupted, or the Run ends
+            try:
+                raise ended.get(timeout=RUN_CHECK_SECONDS)
+            except queue.Empty:
+                closed = bridge_closed(api, ref, what)
+                if closed.code == REFUSED:
+                    raise closed
+
+
+# -- selftest ------------------------------------------------------------------
+
+SELFTEST_MINUTES = 5  # what a selftest Run takes, start to stop, about
+SELFTEST_MAX_RUNTIME = 600  # seconds: the cap on its Run, should the stop fail
+SELFTEST_STEP_TIMEOUT = 60  # seconds for the console and forward steps to see the marker
+SELFTEST_STEPS = (
+    "start", "device-info", "sideload", "launch", "console", "screenshot", "forward", "stop"
+)
+
+
+def selftest_app(marker: str) -> bytes:
+    """A tiny dev app, zipped: it shows a screen and prints `marker` every second."""
+    manifest = "title=rce selftest\nmajor_version=1\nminor_version=0\nbuild_version=1\n"
+    main = f"""sub Main()
+    screen = CreateObject("roSGScreen")
+    port = CreateObject("roMessagePort")
+    screen.SetMessagePort(port)
+    scene = screen.CreateScene("Scene")
+    banner = scene.CreateChild("Label")
+    banner.text = "{marker}"
+    banner.translation = [100, 100]
+    screen.Show()
+    while true
+        print "{marker}"
+        msg = wait(1000, port)
+        if type(msg) = "roSGScreenEvent" and msg.IsScreenClosed() then return
+    end while
+end sub
+"""
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as app:
+        app.writestr("manifest", manifest)
+        app.writestr("source/main.brs", main)
+    return archive.getvalue()
+
+
+def read_forwarded(local: tuple[str, int], marker: str, timeout: float) -> bool:
+    """Whether a local TCP connection to `local` reads `marker` within `timeout`."""
+    deadline, seen = time.monotonic() + timeout, b""
+    with socket.create_connection(local, timeout=timeout) as client:
+        while marker.encode() not in seen:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            client.settimeout(remaining)
+            try:
+                chunk = client.recv(65536)
+            except TimeoutError:
+                return False
+            if not chunk:
+                return False
+            seen = seen[-len(marker):] + chunk
+    return True
+
+
+def selftest_device(args: argparse.Namespace) -> DeviceRef:
+    """--device, or the only Device Name; exit 2 when that is ambiguous."""
+    if args.device is not None:
+        return resolve_device(args.device)
+    names = sorted(device_entries())
+    if len(names) != 1:
+        known = f" (Device Names: {', '.join(names)})" if names else ""
+        raise RceError(USAGE, f"pick the Cloud Device to test with --device NAME{known}")
+    return resolve_device(names[0])
+
+
+def cmd_selftest(args: argparse.Namespace) -> None:
+    if not args.live:
+        raise RceError(
+            USAGE,
+            "the offline tests are the pytest suite (`uv run pytest`, or `scripts/check` with "
+            "the lints) in the roku-rce repo. `rce selftest --live` tests a real Cloud Device "
+            "and costs device-minutes.",
+        )
+    ref = selftest_device(args)
+    dev_password(ref)  # before any cost: sideload and screenshot need it
+    name = ref.display
+    confirm(
+        args,
+        f"Start a Run of {name} for the selftest? It takes about {SELFTEST_MINUTES} min "
+        f"(about {usd(SELFTEST_MINUTES * USD_PER_MINUTE)} at {usd(USD_PER_MINUTE * 60)}/h), "
+        f"capped at {SELFTEST_MAX_RUNTIME // 60} min "
+        f"({usd(SELFTEST_MAX_RUNTIME / 60 * USD_PER_MINUTE)}). "
+        "It installs a test app as the dev app, and stops the Run at the end.",
+    )
+    api = CoreAPI()
+    steps: list[dict] = []
+    marker = f"rce-selftest-{secrets.token_hex(4)}"
+
+    def report(passed: bool) -> dict:
+        return {"id": ref.id, "device_name": ref.name, "passed": passed, "steps": steps}
+
+    def step(title: str, action) -> None:
+        """Run one step and report it; a failing step ends the selftest."""
+        number = SELFTEST_STEPS.index(title) + 1
+        try:
+            detail = action()
+        except RceError as error:
+            steps.append({"step": title, "ok": False, "detail": str(error)})
+            if not args.json:
+                print(f"FAIL {number} {title}: {error}", flush=True)
+            raise
+        steps.append({"step": title, "ok": True, "detail": detail})
+        if not args.json:
+            print(f"ok   {number} {title}: {detail}", flush=True)
+
+    def start() -> str:
+        run = start_run(api, ref, StartOptions(max_runtime=SELFTEST_MAX_RUNTIME))["running_device"]
+        return f"Run {run['id']} of {name} takes input"
+
+    def info() -> str:
+        found = device_info(ecp(api, ref, "query/device-info"))
+        dev = "on" if found.get("developer-enabled") else "off"
+        return (
+            f"Roku OS {found.get('software-version')} build {found.get('software-build')}, "
+            f"developer mode {dev}, ECP {found.get('ecp-setting-mode')}"
+        )
+
+    def sideload() -> str:
+        archive = selftest_app(marker)
+        outcome = install_app(Installer.open(api, ref), "rce-selftest.zip", archive)
+        return f"{outcome} a test app ({len(archive)} bytes) that prints {marker}"
+
+    def launch() -> str:
+        ecp(api, ref, "launch/dev", "POST")
+        return "launched the dev app"
+
+    def console() -> str:
+        deadline = time.monotonic() + SELFTEST_STEP_TIMEOUT
+        run = current_run(api, ref)
+        if not any(marker in line for line in console_lines(api, ref, run, deadline)):
+            raise RceError(TIMEOUT, f"the console showed no {marker} in {SELFTEST_STEP_TIMEOUT} s")
+        return f"read {marker} on port {CONSOLE_PORT}"
+
+    def screenshot() -> str:
+        return f"{len(take_screenshot(Installer.open(api, ref)))} bytes"
+
+    def forward() -> str:
+        run = current_run(api, ref)
+        with socket.create_server(("127.0.0.1", 0)) as server:
+            start_forwarding(api, ref, run, CONSOLE_PORT, server)
+            local = server.getsockname()
+            if not read_forwarded(local, marker, SELFTEST_STEP_TIMEOUT):
+                raise RceError(
+                    TIMEOUT,
+                    f"127.0.0.1:{local[1]} read no {marker} in {SELFTEST_STEP_TIMEOUT} s",
+                )
+        return f"read {marker} through 127.0.0.1:{local[1]}"
+
+    def stop() -> str:
+        report = run_report(get_device(api, ref), ref.name)
+        stop_run(api, ref, wait=True)
+        return (
+            f"Run {report['run']['id']} ran {report['elapsed_s'] // 60} min, "
+            f"about {usd(report['elapsed_cost_usd'])}; {name} is shut down"
+        )
+
+    with device_lock(ref, args.wait_lock):
+        try:
+            step("start", start)  # a start that fails stops its own Run
+            try:
+                for title, action in zip(
+                    SELFTEST_STEPS[1:-1], (info, sideload, launch, console, screenshot, forward)
+                ):
+                    step(title, action)
+            finally:  # a failed step or Ctrl-C too: the Run must not keep billing
+                step("stop", stop)
+        except RceError as error:
+            if args.json:
+                print(json.dumps(report(passed=False), indent=2))
+            failed = next(s["step"] for s in steps if not s["ok"])
+            raise RceError(error.code, f"selftest failed at {failed}: {error}")
+    passed = f"All {len(steps)} steps passed on {name}."
+    emit(args, report(passed=True), passed)
+
+
+def parser() -> argparse.ArgumentParser:
+    output = argparse.ArgumentParser(add_help=False)
+    output.add_argument("--json", action="store_true", help="print JSON for scripts")
+
+    root = argparse.ArgumentParser(prog="rce", description="Use Roku Cloud Emulator.")
+    root.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    areas = root.add_subparsers(dest="area", required=True)
+
+    token = areas.add_parser("token", help="the RCE token rce shares with rk")
+    token_cmds = token.add_subparsers(dest="command", required=True)
+    setting = token_cmds.add_parser(
+        "set", parents=[output], help="store the token from a hidden prompt or stdin"
+    )
+    setting.add_argument("argument", nargs="*", help=argparse.SUPPRESS)  # refused, not echoed
+    setting.set_defaults(func=cmd_token_set)
+    checking = token_cmds.add_parser(
+        "status", parents=[output], help="who the token belongs to, its expiry, trial minutes"
+    )
+    checking.set_defaults(func=cmd_token_status)
+
+    device = areas.add_parser("device", help="Cloud Devices and Runs")
+    device_cmds = device.add_subparsers(dest="command", required=True)
+    listing = device_cmds.add_parser("list", parents=[output], help="list Cloud Devices")
+    listing.add_argument("--running", action="store_true", help="only Cloud Devices with a Run")
+    listing.set_defaults(func=cmd_device_list)
+
+    show = device_cmds.add_parser("show", parents=[output], help="one Cloud Device in detail")
+    show.add_argument("device", help="Device Name or RCE id")
+    show.add_argument(
+        "--dev-password",
+        action="store_true",
+        help="also print its stored Dev Password, on stderr, to copy into a CI secret",
+    )
+    show.set_defaults(func=cmd_device_show)
+
+    naming = device_cmds.add_parser(
+        "alias", parents=[output], help="give a Cloud Device a Device Name"  # glossary-ok: spec
+    )
+    naming.add_argument("device", help="Device Name or RCE id")
+    naming.add_argument("name", help="the new Device Name")
+    naming.add_argument("--force", action="store_true", help="take the name from another device")
+    naming.set_defaults(func=cmd_device_alias)
+
+    resolve = device_cmds.add_parser("resolve", parents=[output], help="print a Device Name's id")
+    resolve.add_argument("name", help="a Device Name")
+    resolve.set_defaults(func=cmd_device_resolve)
+
+    locking = argparse.ArgumentParser(add_help=False)
+    locking.add_argument(
+        "--wait-lock", action="store_true", help="wait for another rce holding the device lock"
+    )
+
+    start = device_cmds.add_parser("start", parents=[output, locking], help="start a Run")
+    start.add_argument("device", help="Device Name or RCE id")
+    start.add_argument("--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot)")
+    start.add_argument("--firmware", help="firmware version id (default: the latest)")
+    start.add_argument(
+        "--max-runtime", type=int, default=DEFAULT_MAX_RUNTIME, help="cap in seconds"
+    )
+    start.add_argument("--no-wait", action="store_true", help="return once RCE accepts")
+    start.add_argument(
+        "--timeout", type=float, default=DEFAULT_START_TIMEOUT, help="seconds to wait for ready"
+    )
+    start.set_defaults(func=cmd_device_start)
+
+    stop = device_cmds.add_parser("stop", parents=[output, locking], help="end a Run")
+    stop.add_argument("device", help="Device Name or RCE id")
+    stop.add_argument("--wait", action="store_true", help="wait until it has shut down")
+    stop.add_argument(
+        "--timeout", type=float, default=DEFAULT_STOP_TIMEOUT, help="seconds to wait (--wait)"
+    )
+    stop.set_defaults(func=cmd_device_stop)
+
+    status = device_cmds.add_parser(
+        "status", parents=[output], help="a Cloud Device's Run: state, cap, elapsed time and cost"
+    )
+    status.add_argument("device", help="Device Name or RCE id")
+    status.set_defaults(func=cmd_device_status)
+
+    console = areas.add_parser(
+        "console", parents=[output], help="stream a running Cloud Device's BrightScript console"
+    )
+    console.add_argument("device", help="Device Name or RCE id")
+    console.add_argument("--until", metavar="REGEX", help="exit 0 on the first line that matches")
+    console.add_argument(
+        "--timeout", type=float, metavar="S", help="exit 5 after S seconds (default: never)"
+    )
+    console.add_argument(
+        "--strip-ansi", action="store_true", help="remove colour codes before printing and matching"
+    )
+    console.set_defaults(func=cmd_console)
+
+    forward = areas.add_parser(
+        "forward",
+        parents=[output],
+        help="forward a running Cloud Device's TCP port (debuggers, console) to a local port",
+    )
+    forward.add_argument("device", help="Device Name or RCE id")
+    forward.add_argument("port", type=int, help=f"device port: {', '.join(map(str, FORWARD_PORTS))}")
+    forward.add_argument(
+        "--local", type=int, metavar="N", help="local port on 127.0.0.1 (default: the same)"
+    )
+    forward.set_defaults(func=cmd_forward)
+
+    usage = areas.add_parser(
+        "usage", parents=[output], help="trial minutes used and left, or billed minutes"
+    )
+    usage.set_defaults(func=cmd_usage)
+
+    yes = argparse.ArgumentParser(add_help=False)
+    yes.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+
+    create = device_cmds.add_parser(
+        "create", parents=[output, yes], help="create a Cloud Device (permanent)"
+    )
+    create.add_argument("name", help="Device Name (also its name on RCE)")
+    create.add_argument("--type", required=True, choices=("tv", "stb"), help="device type")
+    create.set_defaults(func=cmd_device_create)
+
+    retire = device_cmds.add_parser(
+        "retire", parents=[output, yes], help="retire a Cloud Device (RCE can't delete)"
+    )
+    retire.add_argument("device", help="Device Name or RCE id")
+    retire.set_defaults(func=cmd_device_retire)
+
+    setup_dev = device_cmds.add_parser(
+        "setup-dev",
+        parents=[output, locking, yes],
+        help="take a Cloud Device to a Dev Snapshot, pausing where a person must act",
+    )
+    setup_dev.add_argument("device", help="Device Name or RCE id (it needs a Device Name)")
+    setup_dev.add_argument("--restart", action="store_true", help="start over from step 1")
+    setup_dev.add_argument(
+        "--keep-running", action="store_true", help="leave the Run going at the end or on failure"
+    )
+    setup_dev.add_argument(
+        "--show-password",
+        action="store_true",
+        help="print the Dev Password once, for you to type it yourself or keep it",
+    )
+    setup_dev.set_defaults(func=cmd_device_setup_dev)
+
+    delete = device_cmds.add_parser(
+        "delete", aliases=["rm"], help="not possible on RCE; see retire"
+    )
+    delete.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    delete.set_defaults(func=cmd_device_delete)
+
+    key = areas.add_parser("key", parents=[output], help="press remote keys on a running device")
+    key.add_argument("device", help="Device Name or RCE id")
+    key.add_argument("keys", nargs="+", metavar="key", help="Home, Select, Up, Lit_a, ...")
+    key.add_argument("--delay", type=int, default=0, help="milliseconds between keys")
+    key.set_defaults(func=cmd_key)
+
+    query = areas.add_parser("ecp", parents=[output], help="send an ECP command to a running device")
+    query.add_argument("device", help="Device Name or RCE id")
+    query.add_argument("path", help="ECP path, e.g. query/device-info or query/active-app")
+    query.add_argument("--method", choices=("GET", "POST"), default="GET", help="HTTP method")
+    query.set_defaults(func=cmd_ecp)
+
+    launch = areas.add_parser("launch", parents=[output], help="launch the dev app on a running device")
+    launch.add_argument("device", help="Device Name or RCE id")
+    launch.add_argument(
+        "--param",
+        dest="params",
+        action="append",
+        default=[],
+        type=launch_param,
+        metavar="KEY=VALUE",
+        help="a launch param (repeatable), URL-encoded for you",
+    )
+    launch.set_defaults(func=cmd_launch)
+
+    sideload = areas.add_parser(
+        "sideload", parents=[output], help="install a zip or RSG package on a running device"
+    )
+    sideload.add_argument("device", help="Device Name or RCE id")
+    sideload.add_argument("file", help="the app's zip, or an RSG package (.bin)")
+    sideload.set_defaults(func=cmd_sideload)
+
+    screenshot = areas.add_parser(
+        "screenshot", parents=[output], help="save a screenshot of the foreground dev app"
+    )
+    screenshot.add_argument("device", help="Device Name or RCE id")
+    screenshot.add_argument(
+        "-o", "--output", required=True, metavar="FILE", help="where to write the JPEG"
+    )
+    screenshot.set_defaults(func=cmd_screenshot)
+
+    snapshot =areas.add_parser("snapshot", help="a Cloud Device's Snapshots and Dev Snapshot")
+    snapshot_cmds = snapshot.add_subparsers(dest="command", required=True)
+    snapshots = snapshot_cmds.add_parser(
+        "list", parents=[output], help="a Cloud Device's Snapshots, marking the Dev Snapshot"
+    )
+    snapshots.add_argument("device", help="Device Name or RCE id")
+    snapshots.set_defaults(func=cmd_snapshot_list)
+
+    taking = snapshot_cmds.add_parser(
+        "take", parents=[output, yes], help="take a Snapshot and wait until it is ready"
+    )
+    taking.add_argument("device", help="Device Name or RCE id")
+    taking.add_argument(
+        "--label", dest="snapshot_name", required=True, help="the Snapshot's name"  # glossary-ok: spec flag name
+    )
+    taking.add_argument(
+        "--timeout", type=float, default=DEFAULT_SNAPSHOT_TIMEOUT, help="seconds to wait for ready"
+    )
+    taking.set_defaults(func=cmd_snapshot_take)
+
+    use_as_dev = snapshot_cmds.add_parser(
+        "use-as-dev", parents=[output, yes], help="make a ready Snapshot the Dev Snapshot"
+    )
+    use_as_dev.add_argument("device", help="Device Name or RCE id")
+    use_as_dev.add_argument("snapshot", type=int, help="Snapshot id")
+    use_as_dev.set_defaults(func=cmd_snapshot_use_as_dev)
+
+    selftest = areas.add_parser(
+        "selftest", parents=[output, locking, yes], help="test rce end to end on a Cloud Device"
+    )
+    selftest.add_argument(
+        "--live", action="store_true", help="start a real Run (costs device-minutes)"
+    )
+    selftest.add_argument(
+        "--device", help="Device Name or RCE id (default: the only Device Name)"
+    )
+    selftest.set_defaults(func=cmd_selftest)
+    return root
+
+
+def main(argv: list[str]) -> int:
+    args = parser().parse_args(argv)
+    try:
+        args.func(args)
+    except RceError as error:
+        print(f"rce: {error}", file=sys.stderr)
+        return error.code
+    except KeyboardInterrupt:  # any Run it started is stopped on the way out
+        print("rce: interrupted", file=sys.stderr)
+        return INTERRUPTED
+    return OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

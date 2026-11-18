@@ -1,0 +1,344 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx>=0.27,<1", "tomli-w>=1,<2", "websockets>=13,<16"]
+# ///
+"""Record RCE's real answers, redacted, for the fake RCE to serve.
+
+Usage: scripts/record-live DEVICE [--run] [--out DIR]
+
+Without --run: free Core API reads only. With --run: one Run of DEVICE,
+started with `rce device start --max-runtime 600` and always stopped, to
+record the Run's answers (Instance API, ECP, installer). It installs an app that
+does not compile, then a form without an archive, then a tiny test app and the
+same again, then launches the test app and records the Utilities page with its
+screenshot.
+A Run bills by the minute: read docs/agents/live-rce.md first.
+
+Each answer goes to DIR/<name>.json (default tests/fixtures/recorded/) as
+{"request", "status", "headers", "body"}, with the token, Dev Password, WebRTC
+credentials, serial numbers, emails, names, the account's, creator's and
+identity provider's ids and device identifiers replaced by "REDACTED", the Run's
+`instance_uuid` by a fixed placeholder everywhere, the organisation's id by 1, and
+each installer page trimmed to the lines `rce` and the fake read.
+Nothing is written unless every step succeeded.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import zipfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import httpx
+
+REPO = Path(__file__).resolve().parent.parent
+RCE = REPO / "bin" / "rce"
+
+
+def load_rce():
+    """`rce` as a module, to reuse its token, client and Run helpers."""
+    loader = importlib.machinery.SourceFileLoader("rce", str(RCE))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader("rce", loader))
+    sys.modules["rce"] = module  # its dataclasses look their module up
+    loader.exec_module(module)
+    return module
+
+
+rce = load_rce()
+
+MAX_RUNTIME = 600  # seconds: the recording takes about 3 minutes
+SCREENSHOT_TIMEOUT = 30  # seconds for the launched test app to reach the foreground
+TEST_APP = "record-live.zip"
+REDACTED = "REDACTED"
+RUN_UUID = "00000000-0000-4000-8000-000000000000"  # every Run's `instance_uuid`
+ORGANISATION_ID = 1
+# JSON fields that hold a secret or someone's identity, and organisation.name.
+SECRET_FIELDS = {
+    "serial_number", "email", "username", "user_email", "full_name", "account_name",
+    "janus_pin", "janus_token", "credential", "creator_id", "idp_id",
+}
+# ECP device-info elements that identify the device or its network.
+SECRET_ELEMENTS = re.compile(
+    r"<(serial-number|device-id|advertising-id|keyed-developer-id|wifi-mac|ethernet-mac"
+    r"|network-name|udn)>([^<]*)</\1>"
+)
+DEV_ID = re.compile(r'("dev_id":\s*")([^"]*)(")')  # in the installer page's params
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+SWEEP_MIN_LENGTH = 6  # shorter values are only replaced in their own field
+KEPT_HEADERS = ("content-type", "www-authenticate")
+INSTALLER_REQUEST = re.compile(rf"/ports/{rce.INSTALLER_PORT}/http/")
+STATUS_LINE = re.compile(r"<font color=")  # the installer page's hidden status lines
+
+
+def envelope(response: httpx.Response) -> dict:
+    json_body = "json" in response.headers.get("content-type", "") and response.content
+    return {
+        "request": f"{response.request.method} {response.request.url.raw_path.decode()}",
+        "status": response.status_code,
+        "headers": {k: response.headers[k] for k in KEPT_HEADERS if k in response.headers},
+        "body": response.json() if json_body else response.text,
+    }
+
+
+def placeholder(parent: str, key: str) -> str | int | None:
+    """What a field's value is replaced with, or None to keep it."""
+    if key in SECRET_FIELDS or (parent, key) == ("organisation", "name"):
+        return REDACTED
+    if key == "instance_uuid":
+        return RUN_UUID
+    if (parent, key) == ("organisation", "id"):
+        return ORGANISATION_ID
+    return None
+
+
+def scrub_json(value: object, found: dict[str, str], parent: str = "") -> object:
+    """`value` with each placeholder in its field; the text ones also go in `found`,
+    to be replaced wherever else they appear."""
+    if isinstance(value, list):
+        return [scrub_json(item, found, parent) for item in value]
+    if not isinstance(value, dict):
+        return value
+    scrubbed = {}
+    for key, item in value.items():
+        replacement = placeholder(parent, key)
+        if replacement is not None and isinstance(item, (str, int)) and item != "":
+            scrubbed[key] = replacement
+            if isinstance(replacement, str):
+                found[str(item)] = replacement
+        else:
+            scrubbed[key] = scrub_json(item, found, key)
+    return scrubbed
+
+
+def scrub_text(text: str, found: dict[str, str]) -> str:
+    def element(match: re.Match) -> str:
+        found[match[2]] = REDACTED
+        return f"<{match[1]}>{REDACTED}</{match[1]}>"
+
+    def dev_id(match: re.Match) -> str:
+        found[match[2]] = REDACTED
+        return f"{match[1]}{REDACTED}{match[3]}"
+
+    return DEV_ID.sub(dev_id, SECRET_ELEMENTS.sub(element, text))
+
+
+def redact(envelopes: dict[str, dict], known: set[str]) -> dict[str, dict]:
+    """Replace secrets and ids in their own fields, then every echo of one anywhere else
+    (a serial number inside a friendly name, the Run's `instance_uuid` in a request line)."""
+    found = dict.fromkeys(known, REDACTED)
+    for item in envelopes.values():
+        body = item["body"]
+        item["body"] = scrub_text(body, found) if isinstance(body, str) else scrub_json(body, found)
+    text = json.dumps(envelopes)
+    found |= dict.fromkeys(EMAIL.findall(text), REDACTED)
+    for value in sorted((v for v in found if len(v) >= SWEEP_MIN_LENGTH), key=len, reverse=True):
+        text = text.replace(json.dumps(value)[1:-1], found[value])
+    return json.loads(text)
+
+
+def trim_page(page: str) -> str:
+    """The lines of an installer page that `rce` and the fake read: its status lines,
+    its messages and its screenshot link. The rest is Roku's own HTML and JavaScript."""
+    kept = [
+        line for line in page.splitlines()
+        if STATUS_LINE.search(line) or rce.installer_messages(line) or rce.SCREENSHOT_LINK.search(line)
+    ]
+    return "".join(f"{line}\n" for line in kept)
+
+
+def publishable(envelopes: dict[str, dict], known: set[str]) -> dict[str, dict]:
+    """The answers as they can be published: installer pages trimmed (`trim_page`),
+    then secrets and ids replaced (`redact`)."""
+    for item in envelopes.values():
+        if INSTALLER_REQUEST.search(item["request"]):
+            item["body"] = trim_page(item["body"])
+    return redact(envelopes, known)
+
+
+def ok(api, response: httpx.Response) -> httpx.Response:
+    """The response, if it succeeded: a failure is not a shape to record."""
+    if not response.is_success:
+        raise api.error(response)
+    return response
+
+
+def core_reads(api, ref) -> dict[str, httpx.Response]:
+    """The free Core API reads: no Run, nothing changed."""
+    now = datetime.now(timezone.utc)
+    week = {"start": rce.iso(now - timedelta(days=7)), "end": rce.iso(now), "interval": "24h"}
+    reads = {
+        "user-me": ("/user/me", {}),
+        "devices": ("/devices", {}),
+        "device": (f"/devices/{ref.id}", {}),
+        "snapshots": (f"/devices/{ref.id}/snapshots", {}),
+        "firmware-versions": ("/firmwareVersions", {}),
+        "trial-status": ("/usage/trial-status", {}),
+        "usage-user": ("/usage/user", week),
+    }
+    answers = {name: ok(api, api.send("GET", api.base + path, params=params)) for name, (path, params) in reads.items()}
+    first = answers["snapshots"].json()[0]["id"]
+    answers["snapshot"] = ok(api, api.send("GET", f"{api.base}/devices/{ref.id}/snapshots/{first}"))
+    return answers
+
+
+def refuse_if_running(devices: list[dict]) -> None:
+    """Start nothing while any Cloud Device has a Run: it may be someone else's."""
+    names = rce.device_names_by_id()
+    running = [rce.describe(d["id"], names.get(d["id"])) for d in devices if rce.has_run(d)]
+    if running:
+        raise rce.RceError(
+            rce.REFUSED, f"{', '.join(running)} has a Run; record-live starts none while one runs."
+        )
+
+
+def cli(*args: str) -> int:
+    """Run `rce`, its output passing through; its exit code. On Ctrl-C or a kill it
+    lets `rce` finish (a Ctrl-C reaches it too, and it stops any Run it started),
+    then raises KeyboardInterrupt."""
+    env = {**os.environ, rce.LOCK_OWNER_VAR: "record-live"}
+    process = subprocess.Popen([str(RCE), *args], env=env)
+    interrupted = False
+    while True:
+        try:
+            code = process.wait()
+            break
+        except KeyboardInterrupt:
+            interrupted = True
+    if interrupted:
+        raise KeyboardInterrupt
+    return code
+
+
+def stop_run(api, ref) -> None:
+    """Stop the Cloud Device's Run, if it has one, and confirm through the Core API that it ended."""
+    if rce.has_run(rce.get_device(api, ref)):
+        cli("device", "stop", ref.arg, "--wait")
+    if rce.has_run(rce.get_device(api, ref)):
+        raise rce.RceError(
+            rce.ERROR, f"{ref.display} is still running: stop it with `rce device stop {ref.arg}`"
+        )
+
+
+def digest_challenge(api, response: httpx.Response) -> httpx.Response:
+    """The response, if it is the installer's own 401: the fake reads its challenge."""
+    if response.status_code != 401 or not response.headers.get("www-authenticate", "").startswith("Digest "):
+        raise api.error(response)
+    return response
+
+
+def device_page(api, response: httpx.Response) -> httpx.Response:
+    """The response, if it is the installer's own page (`rce`'s `installer_page`):
+    a failed install is a shape to record too."""
+    if not rce.installer_page(response):
+        raise api.error(response)
+    return response
+
+
+def broken_app(app: bytes) -> bytes:
+    """`app` with BrightScript that does not compile: its Main has no `end sub`.
+    Roku OS 16.0.4 answers it "Unzip failed", stored (Run 4291) or deflated (Run 4300),
+    though both zips are valid: that is how its installer reports this app."""
+    archive = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(app)) as source:
+        manifest = source.read("manifest")
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as broken:
+        broken.writestr("manifest", manifest)
+        broken.writestr("source/main.brs", 'sub Main()\n    print "record-live"\n')
+    return archive.getvalue()
+
+
+def run_reads(api, ref, dev_password: str) -> dict[str, httpx.Response]:
+    """Start one Run, record its answers, and stop it whatever happens."""
+    try:
+        if code := cli("device", "start", ref.arg, "--max-runtime", str(MAX_RUNTIME)):
+            raise rce.RceError(code, f"`rce device start {ref.arg}` failed")
+        run = rce.current_run(api, ref)
+
+        def device_port(port: int, method: str, path: str, **kwargs) -> httpx.Response:
+            return rce.port_http(api, run, port, method, path, **kwargs)
+
+        def inspect(password: str) -> httpx.Response:
+            auth = rce.InstallerAuth(rce.DEV_USER, password)
+            return device_port(rce.INSTALLER_PORT, "POST", "plugin_inspect", files=rce.SCREENSHOT_FORM, auth=auth)
+
+        def install(archive: bytes | None) -> httpx.Response:
+            form = {"mysubmit": (None, "Install")}
+            if archive is not None:
+                form["archive"] = (TEST_APP, archive, "application/octet-stream")
+            auth = rce.InstallerAuth(rce.DEV_USER, dev_password)
+            return device_page(api, device_port(
+                rce.INSTALLER_PORT, "POST", "plugin_install", files=form, auth=auth, timeout=rce.INSTALL_TIMEOUT
+            ))
+
+        def screenshot_page() -> httpx.Response | None:
+            page = ok(api, inspect(dev_password))
+            return page if rce.SCREENSHOT_LINK.search(page.text) else None
+
+        answers = {
+            "device-running": ok(api, api.send("GET", f"{api.base}/devices/{ref.id}")),
+            "input-ready": ok(api, api.send("GET", f"{run.address}/api/v0/input/ready")),
+            "ecp-device-info": ok(api, device_port(8060, "GET", "query/device-info")),
+            "ecp-active-app": ok(api, device_port(8060, "GET", "query/active-app")),
+            "installer-wrong-password": digest_challenge(api, inspect("not-the-dev-password")),
+            "installer-inspect": ok(api, inspect(dev_password)),  # Home screen in the foreground
+        }
+        app = rce.selftest_app("record-live")  # once: the same bytes again are "identical"
+        # Failures first: either may remove the dev app, and launch/dev needs it.
+        answers["install-failed"] = install(broken_app(app))
+        answers["install-form-error"] = install(None)
+        answers["install-installed"] = install(app)
+        answers["install-identical"] = install(app)
+        answers["ecp-launch-dev"] = ok(api, device_port(8060, "POST", "launch/dev"))
+        answers["installer-inspect-screenshot"] = rce.poll(SCREENSHOT_TIMEOUT, "no screenshot", screenshot_page)
+        return answers
+    finally:
+        stop_run(api, ref)
+
+
+def write(out: Path, envelopes: dict[str, dict]) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    for name, item in envelopes.items():
+        (out / f"{name}.json").write_text(json.dumps(item, indent=2, ensure_ascii=False) + "\n")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="record-live", description=__doc__.split("\n")[0])
+    parser.add_argument("device", help="Device Name or RCE id")
+    parser.add_argument("--run", action="store_true", help="also start one Run and record it (bills)")
+    parser.add_argument("--out", type=Path, default=REPO / "tests" / "fixtures" / "recorded")
+    args = parser.parse_args(argv)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)  # stop the Run on kill too
+    try:
+        api = rce.CoreAPI()
+        ref = rce.resolve_device(args.device)
+        answers = core_reads(api, ref)
+        known = {rce.load_token()[0], answers["user-me"].json()["id"]}  # the account's id
+        if args.run:
+            refuse_if_running(answers["devices"].json())
+            password = rce.dev_password(ref)  # before starting: no Run for a step that can't succeed
+            known.add(password)
+            answers |= run_reads(api, ref, password)
+    except rce.RceError as error:
+        print(f"record-live: {error}", file=sys.stderr)
+        return error.code
+    except KeyboardInterrupt:
+        print("record-live: interrupted", file=sys.stderr)
+        return rce.INTERRUPTED
+    write(args.out, publishable({name: envelope(r) for name, r in answers.items()}, known))
+    print(f"Recorded {len(answers)} answers in {args.out}.")
+    return rce.OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

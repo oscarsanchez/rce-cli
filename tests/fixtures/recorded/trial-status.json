@@ -1,0 +1,14 @@
+{
+  "request": "GET /api/v1/usage/trial-status",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "plan_status": "trial",
+    "trial": {
+      "mins_used": 49,
+      "mins_limit": 600
+    }
+  }
+}
