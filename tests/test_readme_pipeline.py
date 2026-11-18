@@ -12,6 +12,7 @@ import pytest
 from conftest import REPO
 
 COMMAND = re.compile(r"(?<![\w/.-])rce((?: [a-z][\w-]*){1,2})(.*)")
+START, STOP = "Start the Run", "Stop the Run"  # the recipe's step names
 
 
 def pipeline_section() -> str:
@@ -48,7 +49,7 @@ def run_start_step(tmp_path, exit_code: int) -> tuple[int, dict[str, str]]:
     (bin_ / "rce").chmod(0o755)
     outputs = tmp_path / "github_output"
     outputs.write_text("")
-    script = recipe_steps()["Start the Run"]["run"]
+    script = recipe_steps()[START]["run"]
     step = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
         env={**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(outputs)},
@@ -71,7 +72,7 @@ def test_pipeline_recipe_uses_only_commands_and_flags_rce_has(rce):
 
 
 def test_a_refused_start_is_recorded_and_still_fails_the_step(tmp_path):
-    assert recipe_steps()["Start the Run"].get("id"), "the start step has no id to read its output by"
+    assert recipe_steps()[START].get("id"), "the start step has no id to read its output by"
     code, outputs = run_start_step(tmp_path, 4)
     assert code == 4
     assert outputs, "a refused start (exit 4) records nothing"
@@ -84,12 +85,16 @@ def test_a_start_that_may_have_made_a_run_records_no_refusal(tmp_path, exit_code
     assert outputs == {}
 
 
-def test_the_stop_step_always_runs_unless_the_start_was_refused(tmp_path):
+def test_the_stop_step_runs_once_the_start_step_ran_unless_it_was_refused(tmp_path):
+    """`always()` keeps the stop after a failed step or a cancelled job; it must still skip
+    when the start step never ran (an earlier step failed: the Run there is someone else's)
+    and when the start was refused. A step that never ran has outcome `skipped`, or none."""
     steps = recipe_steps()
-    start_id = steps["Start the Run"]["id"]
+    start_id = steps[START]["id"]
     [(key, value)] = run_start_step(tmp_path, 4)[1].items()
-    condition = steps["Stop the Run"].get("if", "")
-    assert "always()" in condition, "the stop step no longer runs after a failed step or a cancelled job"
-    assert re.fullmatch(
-        rf"always\(\) && steps\.{start_id}\.outputs\.{key} != '{value}'", condition
-    ), f"the stop step isn't skipped after a refused start: if: {condition}"
+    condition = steps[STOP].get("if", "")
+    ran = f"""contains(fromJSON('["success", "failure", "cancelled"]'), steps.{start_id}.outcome)"""
+    refused = f"steps.{start_id}.outputs.{key} != '{value}'"
+    assert condition == f"always() && {ran} && {refused}", (
+        f"the stop step must run only after a start step that ran and wasn't refused: if: {condition}"
+    )
