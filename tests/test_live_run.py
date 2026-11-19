@@ -9,11 +9,13 @@ import subprocess
 import time
 
 from conftest import REPO, RCE
-from fake_rce import ALREADY_RUNNING
+from fake_rce import ALREADY_RUNNING, Response
 
 LIVE_RUN = REPO / "scripts" / "live-run"
 START = "/api/v1/devices/361/start"
 STOP = "/api/v1/devices/361/stop"
+DEVICE = "/api/v1/devices/361"
+REFUSED = Response(409, {"detail": "The device is locked."})
 
 
 def agents_device(rce, fake_rce) -> None:
@@ -136,7 +138,7 @@ def test_it_waits_while_something_runs_then_gives_up_starting_nothing(rce, fake_
 
     result = live_run(rce, "ticket-03", "--", "true")
 
-    assert result.returncode == 4
+    assert result.returncode == 5  # timed out, as `rce` says it; a refused start is 4
     assert len(fake_rce.requests_to("GET", "/api/v1/devices")) >= 2  # it looked again
     assert "Someone's RCE Player (Run 9000)" in result.stderr
     assert "Started nothing" in result.stderr
@@ -156,21 +158,39 @@ def test_it_starts_once_the_other_run_ends(rce, fake_rce):
     assert len(fake_rce.requests_to("POST", START)) == 1
 
 
-def test_ctrl_c_during_the_command_still_stops_the_run(rce, fake_rce):
-    agents_device(rce, fake_rce)
-    started = rce.cwd / "started"
-    live = subprocess.Popen(
-        [str(LIVE_RUN), "ticket-03", "--", "sh", "-c", f"touch {started}; sleep 60"],
+def live_run_in_background(rce, *command: str) -> subprocess.Popen:
+    return subprocess.Popen(
+        [str(LIVE_RUN), "ticket-03", "--", *command],
         cwd=rce.cwd,
         env=rce.env,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,  # its own process group, as a terminal's Ctrl-C reaches
     )
+
+
+def wait_for(condition, what: str) -> None:
     deadline = time.monotonic() + 30
-    while not started.exists():
-        assert time.monotonic() < deadline, "the command never ran"
+    while not condition():
+        assert time.monotonic() < deadline, what
         time.sleep(0.05)
+
+
+def live_run_until_told(rce):
+    """live-run in the background with a command that has started and ends once `go` exists:
+    the test changes the fake RCE before the stop."""
+    started, go = rce.cwd / "started", rce.cwd / "go"
+    command = f"touch {started}; while [ ! -e {go} ]; do sleep 0.05; done"
+    live = live_run_in_background(rce, "sh", "-c", command)
+    wait_for(started.exists, "the command never ran")
+    return live, go
+
+
+def test_ctrl_c_during_the_command_still_stops_the_run(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    started = rce.cwd / "started"
+    live = live_run_in_background(rce, "sh", "-c", f"touch {started}; sleep 60")
+    wait_for(started.exists, "the command never ran")
 
     os.killpg(live.pid, signal.SIGINT)
     _, stderr = live.communicate(timeout=60)
@@ -178,3 +198,97 @@ def test_ctrl_c_during_the_command_still_stops_the_run(rce, fake_rce):
     assert live.returncode == 130, stderr
     assert len(fake_rce.requests_to("POST", STOP)) == 1
     assert rce.json("device", "list", "--running") == []
+
+
+def test_sigterm_is_passed_on_to_the_command_and_the_run_still_stopped(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    started, got = rce.cwd / "started", rce.cwd / "got-sigterm"
+    command = f"trap 'touch {got}; kill $!; exit 0' TERM; touch {started}; sleep 60 & wait"
+    live = live_run_in_background(rce, "sh", "-c", command)
+    wait_for(started.exists, "the command never ran")
+
+    live.terminate()  # to live-run alone, not its process group
+    _, stderr = live.communicate(timeout=60)
+
+    assert got.exists(), stderr
+    assert live.returncode == 130, stderr  # interrupted, though the command exited 0
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
+    assert rce.json("device", "list", "--running") == []
+
+
+def test_a_signal_during_the_start_stops_the_run_and_runs_nothing(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    fake_rce.start_delay = 2  # RCE has made the Run but not answered yet
+    ran = rce.cwd / "ran"
+    live = live_run_in_background(rce, "touch", str(ran))
+    wait_for(lambda: fake_rce.requests_to("POST", START), "it never started")
+
+    live.terminate()
+    _, stderr = live.communicate(timeout=60)
+
+    assert live.returncode == 130, stderr
+    assert not ran.exists()
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
+    assert rce.json("device", "list", "--running") == []
+
+
+def test_a_signal_while_waiting_its_turn_starts_nothing(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    someone_running(fake_rce)
+    rce.env.update(LIVE_RUN_POLL_S="600", LIVE_RUN_WAIT_S="600")  # it would sleep 10 min
+    live = live_run_in_background(rce, "true")
+    wait_for(lambda: fake_rce.requests_to("GET", "/api/v1/devices"), "it never looked")
+
+    live.terminate()
+    _, stderr = live.communicate(timeout=30)
+
+    assert live.returncode == 130, stderr
+    assert fake_rce.requests_to("POST", START) == []
+
+
+def test_a_stop_that_leaves_its_run_running_is_tried_again(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    fake_rce.fail_next("POST", STOP, REFUSED)  # `rce` exits 4, as for a Run already ended
+
+    result = live_run(rce, "ticket-03", "--", "true")
+
+    assert result.returncode == 0, result.stderr
+    assert len(fake_rce.requests_to("POST", STOP)) == 2
+    assert rce.json("device", "list", "--running") == []
+
+
+def test_a_stop_that_twice_leaves_its_run_running_failed(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    fake_rce.fail_next("POST", STOP, REFUSED, times=2)
+
+    result = live_run(rce, "ticket-03", "--", "true")
+
+    assert result.returncode == 1
+    assert "the stop failed: Run 9000 may still bill" in result.stderr
+    assert len(fake_rce.requests_to("POST", STOP)) == 2
+
+
+def test_a_stop_whose_run_cannot_be_read_failed(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    live, go = live_run_until_told(rce)
+    fake_rce.fail_next("GET", DEVICE, REFUSED, times=100)  # from the stop on, the Run can't be read
+    go.touch()
+
+    _, stderr = live.communicate(timeout=60)
+
+    assert live.returncode == 1, stderr
+    assert "the stop failed: Run 9000 may still bill" in stderr
+
+
+def test_a_failed_look_at_other_runs_after_the_stop_still_prints_the_record(rce, fake_rce):
+    agents_device(rce, fake_rce)
+    live, go = live_run_until_told(rce)
+    fake_rce.fail_next("GET", "/api/v1/devices", REFUSED, times=100)  # `rce device list` fails
+    go.touch()
+
+    _, stderr = live.communicate(timeout=60)
+
+    assert live.returncode == 0, stderr  # the command's: the list is only informational
+    assert "record: Run 9000 on bot" in stderr
+    assert "usage after:" in stderr
+    assert rce.json("device", "status", "bot")["run"] is None

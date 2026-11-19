@@ -131,6 +131,14 @@ def test_private_lint_passes_without_a_terms_file(tmp_path):
     assert result.returncode == 0, result.stdout
 
 
+def test_private_lint_passes_outside_a_git_repo(tmp_path):
+    (tmp_path / "README.md").write_text("auto is 4242\n")
+
+    result = lint("lint_private.py", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
 def worktree_of(main, tmp_path):
     git = ["git", "-C", str(main), "-c", "user.name=t", "-c", "user.email=t@t"]
     subprocess.run([*git, "add", "README.md"], check=True)
