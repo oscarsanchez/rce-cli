@@ -345,7 +345,7 @@ def test_with_no_wait_ctrl_c_before_rce_answers_stops_the_run_too(rce, fake_rce)
 
 def test_a_start_that_loses_its_answer_after_rce_accepted_it_stops_the_run(rce, fake_rce):
     player(rce, fake_rce)
-    fake_rce.start_dropped = True
+    fake_rce.start_status = 0
 
     result = rce.run("device", "start", "player")
 
@@ -366,6 +366,35 @@ def test_a_start_that_gets_no_answer_and_no_run_says_the_start_didnt_happen(rce,
     assert "player (351) has no Run: the start didn't happen" in result.stderr
     assert "refused" not in result.stderr
     assert not fake_rce.requests_to("POST", STOP)
+
+
+def test_a_start_answered_503_after_rce_made_a_run_stops_the_run_once(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.start_status = 503
+
+    result = rce.run("device", "start", "player")
+
+    assert result.returncode == 1
+    assert "RCE answered 503" in result.stderr
+    assert "RCE had started a Run anyway, and rce stopped it" in result.stderr
+    assert "refused" not in result.stderr
+    assert len(fake_rce.requests_to("POST", START)) == 1
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
+
+
+def test_a_start_answered_503_with_no_run_made_says_the_start_didnt_happen(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.fail_next("POST", START, Response(503, {"detail": "Service Unavailable"}))
+
+    result = rce.run("device", "start", "player")
+
+    assert result.returncode == 1
+    assert "RCE answered 503" in result.stderr
+    assert "player (351) has no Run: the start didn't happen" in result.stderr
+    assert "refused" not in result.stderr
+    assert len(fake_rce.requests_to("POST", START)) == 1
+    assert not fake_rce.requests_to("POST", STOP)
+    assert fake_rce.devices[351]["status"] == "shutdown"
 
 
 @pytest.mark.parametrize(
@@ -397,7 +426,7 @@ def test_ctrl_c_before_rce_got_the_start_says_it_didnt_happen_when_the_stop_fail
 
 def test_a_start_with_no_answer_that_cannot_check_for_a_run_stops_any_run(rce, fake_rce):
     player(rce, fake_rce)
-    fake_rce.start_dropped, fake_rce.start_delay = True, 1
+    fake_rce.start_status, fake_rce.start_delay = 0, 1
     tty = rce.interactive("device", "start", "player")
     wait_for_request(fake_rce, "POST", START)
     fake_rce.fail_next("GET", DEVICE, Response(500, {"detail": "Internal Server Error"}))
@@ -414,7 +443,7 @@ def test_ctrl_c_while_checking_for_a_run_after_a_start_with_no_answer_stops_the_
     rce, fake_rce
 ):
     player(rce, fake_rce)
-    fake_rce.start_dropped, fake_rce.start_delay = True, 1
+    fake_rce.start_status, fake_rce.start_delay = 0, 1
     tty = rce.interactive("device", "start", "player")
     wait_for_request(fake_rce, "POST", START)
     looked = len(fake_rce.requests_to("GET", DEVICE))

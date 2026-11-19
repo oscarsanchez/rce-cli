@@ -24,8 +24,9 @@ Extending it in later tickets:
   `INSTANCE_API` and can find their Run with `run_for(uuid)`;
 - force an error or rate limit: `fail_next(method, path, Response(...))`, or
   close the connection without answering: `fail_next(method, path, NO_ANSWER)`;
-- an accepted start: `start_delay` holds its answer, `start_dropped` never sends it
-  (closing the connection after `start_delay`);
+- an accepted start: `start_delay` holds its answer, `start_status` sets it: 0 never
+  sends it (closing the connection after `start_delay`), 503 answers RCE's documented
+  503 though the Run was made;
 - inspect traffic: `self.requests` records every request the fake received.
 - a Run address elsewhere: `address_origin` replaces this server in instance_api_url
   (another host, scheme or port, or no scheme).
@@ -369,7 +370,7 @@ class FakeRCE:
         self.input_delay = 0.0
         self.stop_delay = 0.0
         self.start_delay = 0.0  # an accepted start's answer is held this long
-        self.start_dropped = False  # an accepted start gets no answer
+        self.start_status = 202  # an accepted start's answer; 0: none (see above)
         self.run_hidden_reads = 0  # reads after a start that still show no Run; math.inf: never
         self._hidden_reads: dict[int, float] = {}  # device id -> reads left that show no Run
         self.snapshot_delay = 0.0  # a new Snapshot is ready this long after it is taken
@@ -615,8 +616,10 @@ class FakeRCE:
         device.update(status="pending", running_device=run)
         self._due[device["id"]] = ("running", time.monotonic() + self.boot_delay)
         self._hidden_reads[device["id"]] = self.run_hidden_reads
+        if self.start_status != 202:
+            return Response(self.start_status, {"detail": "Service Unavailable"}, delay=self.start_delay)
         answer = device | {"running_device": None}  # as live RCE answers (Run 4615)
-        return Response(0 if self.start_dropped else 202, answer, delay=self.start_delay)
+        return Response(202, answer, delay=self.start_delay)
 
     def _stop_device(self, request: Request, match: re.Match) -> Response:
         device = self.devices.get(int(match[1]))

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from conftest import TOKEN
-from fake_rce import WEBRTC_SECRETS, iso
+from fake_rce import WEBRTC_SECRETS, Response, iso
 
 STOP = "/api/v1/devices/351/stop"
 
@@ -68,6 +68,18 @@ def test_stopping_a_device_that_is_not_running_says_so(rce, fake_rce):
     assert "player (351) is not running" in result.stderr
     assert "rce device start player" in result.stderr
     assert not fake_rce.requests_to("POST", STOP)
+
+
+def test_a_stop_answered_503_fails_once_as_today(rce, fake_rce):
+    """Only a start takes the careful path on a 503; a stop is neither retried nor checked."""
+    running_player(rce, fake_rce)
+    fake_rce.fail_next("POST", STOP, Response(503, {"detail": "Service Unavailable"}))
+
+    result = rce.run("device", "stop", "player")
+
+    assert result.returncode == 1
+    assert "RCE answered 503: Service Unavailable" in result.stderr
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
 
 
 def test_stop_of_an_unknown_name_is_not_found(rce, fake_rce):
