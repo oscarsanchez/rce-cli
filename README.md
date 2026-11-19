@@ -14,7 +14,7 @@ Issues are welcome on GitHub Issues; pull requests aren't accepted yet. To repor
 
 ## Install
 
-There are three installs, one for each way of using `rce`. Only the plugin adds anything to Claude Code (the skill and the Stop hook), so nothing runs twice.
+There are three installs, one for each way of using `rce`. Only the plugin adds anything to Claude Code (the skill and the Stop hook), so nothing runs twice. [Cursor](#cursor) uses the terminal install's `rce` and the plugin's skill.
 
 ### Claude Code: the plugin
 
@@ -40,6 +40,19 @@ This links `bin/rce` into `~/.local/bin` (put that on your PATH), so `git pull` 
 ### Pipelines
 
 A pipeline downloads the single `bin/rce` script at a release tag, with no clone and no install. See [Pipelines (CI/CD)](#pipelines-cicd).
+
+### Cursor
+
+Cursor's agent runs the terminal install's `rce`, so do that install first. The plugin's `rce` is not on Cursor's PATH.
+
+Signed in to Cursor, its agent also loads skills from installed Claude Code plugins, so with the plugin installed it already has the `rce` skill: add nothing, or Cursor loads it twice. Without the plugin, or if Cursor doesn't list `rce` among its skills, link the skill from your clone:
+
+```sh
+mkdir -p ~/.cursor/skills
+ln -sfn "$PWD/skills/rce" ~/.cursor/skills/rce    # from the rce-cli clone
+```
+
+Cursor doesn't run the plugin's Stop hook, so nothing warns you when its agent finishes with a Run still billing. Check with `rce device list --running`.
 
 ### Moving from the old install
 

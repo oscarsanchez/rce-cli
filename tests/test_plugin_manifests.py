@@ -44,12 +44,13 @@ def test_plugin_version_is_the_version_rce_prints(rce):
 
 
 def test_plugin_skills_are_the_rce_skill_folder():
+    # Cursor names a plugin's skill after its folder, so the folder is named `rce` too.
     plugin = load(MANIFESTS / "plugin.json")
 
     skills = [inside_repo(path) for path in plugin["skills"]]
 
-    assert skills == [REPO / "skill"]
-    assert "\nname: rce\n" in (REPO / "skill" / "SKILL.md").read_text()
+    assert skills == [REPO / "skills" / "rce"]
+    assert "\nname: rce\n" in (REPO / "skills" / "rce" / "SKILL.md").read_text()
 
 
 def test_marketplace_lists_the_plugin_from_this_repo():

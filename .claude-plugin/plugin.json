@@ -8,5 +8,5 @@
   "repository": "https://github.com/oscarsanchez/rce-cli",
   "license": "MIT",
   "keywords": ["roku", "rce", "cloud-device"],
-  "skills": ["./skill"]
+  "skills": ["./skills/rce"]
 }
