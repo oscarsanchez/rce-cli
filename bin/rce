@@ -823,11 +823,13 @@ class StartOptions:
 class CommandRun:
     """The Run of one rce command, as `command_run` hands it back."""
 
-    def __init__(self, api: CoreAPI, ref: DeviceRef, adopt: bool, shared: bool = False):
+    def __init__(
+        self, api: CoreAPI, ref: DeviceRef, adopt: bool, leave_unknown_start: bool = False
+    ):
         self.api, self.ref, self.adopt = api, ref, adopt
-        # A Pool member: other callers start it too, so a Run found after a start RCE
-        # may have taken may be theirs. Its error is passed on, with no look and no stop.
-        self.shared = shared
+        # Leave a start RCE may have taken (`start_unknown`) to the caller: its error is
+        # passed on, and neither it nor Ctrl-C before RCE accepted the start looks or stops.
+        self.leave_unknown_start = leave_unknown_start
         self.device: dict | None = None  # the Cloud Device as RCE last gave it
         # The start was sent and RCE's answer didn't say whether it took it: none yet,
         # none at all, or a gateway error.
@@ -870,7 +872,7 @@ class CommandRun:
                 if error.status not in (None, *GATEWAY_ERRORS):
                     self.start_unknown = False
                     raise start_refusal(api, error, ref, body)
-                if self.shared:  # RCE may have made a Run
+                if self.leave_unknown_start:  # RCE may have made a Run
                     raise
                 raise start_uncertain(api, ref, error)
             self.start_unknown = False
@@ -885,7 +887,7 @@ class CommandRun:
                     raise RceError(ERROR, str(error), error.rce_code, error.status) from error
                 raise
         except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
-            if self.started or not self.shared:
+            if self.started or not self.leave_unknown_start:
                 self._stop_after_failure()  # Stop first: a check could race RCE accepting it.
             raise
 
@@ -903,16 +905,21 @@ class CommandRun:
 
 @contextmanager
 def command_run(
-    api: CoreAPI, ref: DeviceRef, keep: bool, adopt: bool, wait_lock: bool, shared: bool = False
+    api: CoreAPI,
+    ref: DeviceRef,
+    keep: bool,
+    adopt: bool,
+    wait_lock: bool,
+    leave_unknown_start: bool = False,
 ):
     """A Run's whole life inside one rce command, under the device lock.
 
     Entering takes the lock and starts nothing: `start()` gets the Run going and
     `stop()` ends it. When the block ends, a Run this command started is stopped
-    unless `keep`, or a stop was already tried. `shared`: see `CommandRun`.
+    unless `keep`, or a stop was already tried. `leave_unknown_start`: see `CommandRun`.
     """
     with device_lock(ref, wait_lock):
-        run = CommandRun(api, ref, adopt, shared)
+        run = CommandRun(api, ref, adopt, leave_unknown_start)
         try:
             yield run
         finally:
@@ -1382,7 +1389,11 @@ def claim_free(
     for ref in free:
         run = None
         try:
-            with command_run(api, ref, keep=True, adopt=False, wait_lock=False, shared=True) as run:
+            # Other callers start the members too: a Run found after a start RCE may have
+            # taken may be theirs, so that start is left alone (ADR-0002).
+            with command_run(
+                api, ref, keep=True, adopt=False, wait_lock=False, leave_unknown_start=True
+            ) as run:
                 run.start(replace(options, snapshot=pool[ref.id]))
             return ref, run.device
         except KeyboardInterrupt:
