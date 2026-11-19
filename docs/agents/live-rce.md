@@ -30,7 +30,7 @@ These still need the maintainer's OK in this conversation, each time: `device cr
 
 ## Sharing the agents' Cloud Device
 
-Several agents may work on it at once, and the trial runs one Run at a time across the whole org.
+Several agents may work on it at once.
 
 - **Wait your turn.** Before each start, while `rce device list --running` isn't empty, re-check every 60 s; after 20 min, report it and start nothing.
 - **Know your Run.** Note your Run id (`run.id` from `rce device start --json`). Before each `rce` call that reaches a Run (`console`, `sideload`, `key`, `launch`, `screenshot`, `ecp`, `forward`), confirm `rce device status <device> --json` still shows that id.
