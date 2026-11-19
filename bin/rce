@@ -312,7 +312,7 @@ def origin(url: str) -> tuple[str, str, int | None]:
 
 
 def exit_code_for(status: int, message: str) -> int:
-    if status == 404 or (status == 403 and not message):  # empty 403: not found or not yours
+    if status == 404 or (status == 403 and not message):  # empty 403: not found or not yours (not-found-ok: the rule)
         return NOT_FOUND
     if 400 <= status < 500:
         return REFUSED
@@ -994,7 +994,7 @@ def ecp(api: CoreAPI, ref: DeviceRef, path: str, method: str = "GET", **kwargs) 
             f"up with `rce device setup-dev {ref.arg}`, or by hand: {MOBILE_APPS_SETTING} > "
             "Permissive.",
         )
-    if response.status_code == 404 and not response.content:  # the proxy's own 404 has a body
+    if response.status_code == 404 and not response.content:  # the proxy's own 404 has a body; not-found-ok: ECP's, not RCE's
         why = (
             f"no dev app is installed. Sideload one with `rce sideload {ref.arg} <file>`."
             if urlsplit(path).path.strip("/") == "launch/dev"

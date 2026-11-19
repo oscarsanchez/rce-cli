@@ -29,6 +29,7 @@ Read during review. Mechanical rules are enforced by the check command (see READ
 
 - Tests run `rce` as a subprocess against the fake RCE and assert on stdout, exit codes, files and the requests the fake received (Seam A). They never import `rce` internals.
 - The fake builds its answers from the recorded RCE answers in `tests/fixtures/recorded/`, and sets only the ids, names, states, timestamps and identity a test relies on. A shape it still invents is listed, with the reason, in that folder's README.
+- Code that branches on an answer the fake invents is a review finding until a live check records RCE's real answer in that README. Ask for the check; it is usually one cheap Run or none.
 
 ## Vocabulary
 

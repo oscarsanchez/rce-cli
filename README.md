@@ -727,13 +727,15 @@ The plugin's `rce` skill teaches Claude the commands, the costs, and its rules: 
 
 ```sh
 git config core.hooksPath .githooks   # once per clone: run the check before every commit
-scripts/check                          # the one check: both lints + the test suite
+scripts/check                          # the one check: the lints + the test suite
 ```
 
 `scripts/check` runs:
 
 - **glossary lint** (`scripts/lint_glossary.py`): fails on any `_Avoid_` term from GLOSSARY.md in code or docs. Matching is whole-word and case-sensitive. For a legitimate use, such as an RCE API path, put `glossary-ok` on the line (`<!-- glossary-ok -->` in Markdown). `.scratch/` is not linted.
 - **test-import lint** (`scripts/lint_test_imports.py`): fails when a test imports `rce` (or uses importlib, runpy or imp to load it) instead of running it as a subprocess.
+- **not-found lint** (`scripts/lint_not_found.py`): fails when `bin/rce` compares a status with 404. RCE answers "not found" with a 404 or an empty 403, a rule `exit_code_for` holds once; code tests `error.code == NOT_FOUND`. A line that must compare (the rule itself, a device's own ECP 404) carries `not-found-ok`.
+- **private lint** (`scripts/lint_private.py`): fails when a term listed in `.private-terms` (gitignored, one per line, `#` for comments) appears in a file git would publish. List there the ids of your own Cloud Devices and Snapshots that must stay unpublished. Without the file (CI, a fresh clone) it passes.
 - **tests** (`uv run pytest -n auto`, in parallel with pytest-xdist; about 30 s). The harness drops `GIT_*` variables, so a test that runs git never touches the repo it is run from.
 
 `core.hooksPath` is relative and shared by every worktree, so each worktree runs its own branch's `.githooks/pre-commit`. A change to the hook reaches a worktree only once that branch merges it.

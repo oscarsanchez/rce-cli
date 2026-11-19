@@ -1,4 +1,4 @@
-"""The check command's two lints, run on a throwaway repo."""
+"""The check command's lints, run on a throwaway repo."""
 
 import subprocess
 import sys
@@ -92,5 +92,72 @@ def test_test_import_lint_passes_subprocess_tests(tmp_path):
     })
 
     result = lint("lint_test_imports.py", root)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_private_lint_flags_a_listed_term_in_any_file_git_would_publish(tmp_path):
+    root = repo_with(tmp_path, {
+        ".private-terms": "# the sample's repo variables\n4242\n9090\n",
+        "README.md": 'e.g. {"375": 9090}\n',
+        "tests/test_a.py": "DEVICE = 4242\n",
+    })
+
+    result = lint("lint_private.py", root)
+
+    assert result.returncode == 1
+    assert "README.md:1" in result.stdout
+    assert "tests/test_a.py:1" in result.stdout
+
+
+def test_private_lint_matches_whole_terms_and_skips_ignored_files(tmp_path):
+    root = repo_with(tmp_path, {
+        ".private-terms": "4242\n",
+        ".gitignore": "notes/\n",
+        "README.md": "Run 142425 and 42420 and v0.4242x\n",
+        "notes/mine.md": "auto is 4242\n",
+    })
+
+    result = lint("lint_private.py", root)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_private_lint_passes_without_a_terms_file(tmp_path):
+    root = repo_with(tmp_path, {"README.md": "auto is 4242\n"})
+
+    result = lint("lint_private.py", root)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_not_found_lint_flags_a_404_compared_with_a_status(tmp_path):
+    root = repo_with(tmp_path, {
+        "bin/rce": (
+            "if error.status == 404:\n"
+            "    pass\n"
+            "if response.status_code in (403, 404):\n"
+            "    pass\n"
+        ),
+    })
+
+    result = lint("lint_not_found.py", root)
+
+    assert result.returncode == 1
+    assert "bin/rce:1" in result.stdout
+    assert "bin/rce:3" in result.stdout
+
+
+def test_not_found_lint_passes_the_shared_rule_and_other_statuses(tmp_path):
+    root = repo_with(tmp_path, {
+        "bin/rce": (
+            "if status == 404 or (status == 403 and not message):  # not-found-ok: the rule\n"
+            "if error.code == NOT_FOUND:\n"
+            "if error.status == 409 and error.rce_code is None:\n"
+            "return Response(404, {})\n"
+        ),
+    })
+
+    result = lint("lint_not_found.py", root)
 
     assert result.returncode == 0, result.stdout
