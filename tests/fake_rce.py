@@ -467,6 +467,14 @@ class FakeRCE:
         self.devices[id] = device
         return device
 
+    def add_snapshot(self, device_id: int, snapshot_id: int, ready: bool = True) -> dict:
+        """Give a Cloud Device another Snapshot, e.g. its Dev Snapshot; `ready=False` while
+        RCE is still saving it. One it doesn't have reads as 404 (a deleted Snapshot)."""
+        snapshot = snapshot_out(snapshot_id, "Dev snapshot") | {"ready": ready}
+        self.snapshots[device_id].append(snapshot)
+        self.devices[device_id]["snapshots"].append(snapshot_id)
+        return snapshot
+
     def address(self, uuid: str) -> str:
         """A Run's address, as the Core API gives it in instance_api_url."""
         origin = self.address_origin or f"http://{self.host}"

@@ -1152,6 +1152,85 @@ def confirm(args: argparse.Namespace, question: str) -> None:
         raise RceError(USAGE, "cancelled")
 
 
+# -- Pools ---------------------------------------------------------------------
+
+
+POOL_VAR = "RCE_POOL"  # a JSON map from each member's RCE id to its Dev Snapshot id
+
+
+def read_pool() -> dict[int, int]:
+    """The Pool from RCE_POOL: each member's RCE id -> its Dev Snapshot id, in RCE_POOL order.
+
+    Exit 2 for anything but a non-empty JSON object of all-digit RCE ids to integer
+    Snapshot ids. It sends nothing, so a typo costs no request.
+    """
+    shape = 'a JSON object from each RCE id to its Dev Snapshot id, e.g. {"375": 2001}'
+    text = os.environ.get(POOL_VAR)
+    if text is None:
+        raise RceError(USAGE, f"{POOL_VAR} is not set: set it to {shape}.")
+    try:
+        pool = json.loads(text)
+    except ValueError as error:
+        raise RceError(USAGE, f"{POOL_VAR} is not JSON ({error}): set it to {shape}.")
+    if not isinstance(pool, dict):
+        raise RceError(USAGE, f"{POOL_VAR} is not a JSON object: set it to {shape}.")
+    if not pool:
+        raise RceError(USAGE, f"{POOL_VAR} is empty: name at least one Cloud Device in it.")
+    for id, snapshot in pool.items():
+        if not is_raw_id(id):
+            raise RceError(
+                USAGE,
+                f"{POOL_VAR} key {id!r} is not an RCE id: a Pool names each Cloud Device "
+                "by its RCE id (all digits), not a Device Name.",
+            )
+        if type(snapshot) is not int:
+            raise RceError(
+                USAGE, f"{POOL_VAR} value for {id} is not a Snapshot id (an integer): {snapshot!r}."
+            )
+    return {int(id): snapshot for id, snapshot in pool.items()}
+
+
+def pool_members(pool: dict[int, int], devices: list[dict]) -> list[dict]:
+    """The Pool's Cloud Devices out of one device list, in RCE_POOL order.
+
+    Exit 3 naming each member RCE doesn't know; exit 2 for a Retired Cloud Device.
+    """
+    by_id = {device["id"]: device for device in devices}
+    if unknown := [str(id) for id in pool if id not in by_id]:
+        raise RceError(
+            NOT_FOUND, f"{POOL_VAR} names Cloud Devices RCE doesn't know: {', '.join(unknown)}."
+        )
+    members = [by_id[id] for id in pool]
+    for device in members:
+        if device["name"].startswith(RETIRED_PREFIX):
+            raise RceError(
+                USAGE,
+                f"Cloud Device {device['id']} is retired (named {device['name']!r}): "
+                f"remove it from {POOL_VAR}.",
+            )
+    return members
+
+
+def dev_snapshot_status(api: CoreAPI, device_id: int, snapshot_id: int) -> str:
+    """A Pool member's Dev Snapshot: `ready`, `not_ready` (RCE still saving it) or `missing`."""
+    try:
+        snapshot = api.get(f"/devices/{device_id}/snapshots/{snapshot_id}")
+    except RceError as error:
+        if error.code != NOT_FOUND:
+            raise
+        return "missing"
+    return "ready" if snapshot["ready"] else "not_ready"
+
+
+def missing_dev_snapshot(device: dict, snapshot_id: int) -> str:
+    """What to do about a Pool member whose Dev Snapshot RCE no longer has."""
+    return (
+        f"{describe(device['id'], device['device_name'])}: Dev Snapshot {snapshot_id} is missing "
+        "(RCE deletes a Snapshot unused for 180 days); take a new one with "
+        f"`rce device setup-dev {device['device_name'] or device['id']}` and put its id in {POOL_VAR}."
+    )
+
+
 # -- dev setup -----------------------------------------------------------------
 
 # `device setup-dev` takes a fresh Cloud Device to a Dev Snapshot. Between
@@ -1686,25 +1765,55 @@ def cmd_token_status(args: argparse.Namespace) -> None:
     emit(args, status, table(rows))
 
 
+LIST_HEADER = ["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN"]
+
+
+def list_row(device: dict) -> list[str]:
+    """A `device_summary` as a row of the `device list` table."""
+    return [
+        str(device["id"]),
+        device["device_name"] or "-",
+        device["name"],
+        device["type"],
+        device["status"],
+        f"since {device['run']['created_at']}" if device["run"] else "-",
+    ]
+
+
 def cmd_device_list(args: argparse.Namespace) -> None:
+    if args.pool:
+        return list_pool(args)
     names = device_names_by_id()
     devices = [device_summary(d, names.get(d["id"])) for d in CoreAPI().get("/devices", items=0)]
     if args.running:
         devices = [d for d in devices if has_run(d)]
     if not devices:
         return emit(args, [], "No running Cloud Devices." if args.running else "No Cloud Devices.")
-    rows = [["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN"]] + [
-        [
-            str(d["id"]),
-            d["device_name"] or "-",
-            d["name"],
-            d["type"],
-            d["status"],
-            f"since {d['run']['created_at']}" if d["run"] else "-",
-        ]
-        for d in devices
+    emit(args, devices, table([LIST_HEADER] + [list_row(d) for d in devices]))
+
+
+def list_pool(args: argparse.Namespace) -> None:
+    """`device list --pool`: the Pool's members, each Dev Snapshot's state, and how many are free."""
+    pool = read_pool()
+    api = CoreAPI()
+    names = device_names_by_id()
+    members = [
+        device_summary(d, names.get(d["id"])) for d in pool_members(pool, api.get("/devices", items=0))
     ]
-    emit(args, devices, table(rows))
+    free = sum(not has_run(d) for d in members)
+    shown = [d for d in members if has_run(d)] if args.running else members
+    for d in shown:
+        d["dev_snapshot"] = {"id": pool[d["id"]], "status": dev_snapshot_status(api, d["id"], pool[d["id"]])}
+    rows = [LIST_HEADER + ["DEV SNAPSHOT"]] + [
+        list_row(d) + [f"{d['dev_snapshot']['id']} {d['dev_snapshot']['status'].replace('_', ' ')}"]
+        for d in shown
+    ]
+    missing = [
+        missing_dev_snapshot(d, d["dev_snapshot"]["id"])
+        for d in shown
+        if d["dev_snapshot"]["status"] == "missing"
+    ]
+    emit(args, shown, "\n".join([table(rows), *missing, f"{free} of {len(members)} free"]))
 
 
 def cmd_device_show(args: argparse.Namespace) -> None:
@@ -2424,6 +2533,9 @@ def parser() -> argparse.ArgumentParser:
     device_cmds = device.add_subparsers(dest="command", required=True)
     listing = device_cmds.add_parser("list", parents=[output], help="list Cloud Devices")
     listing.add_argument("--running", action="store_true", help="only Cloud Devices with a Run")
+    listing.add_argument(
+        "--pool", action="store_true", help=f"only the Pool's members (${POOL_VAR}) and how many are free"
+    )
     listing.set_defaults(func=cmd_device_list)
 
     show = device_cmds.add_parser("show", parents=[output], help="one Cloud Device in detail")

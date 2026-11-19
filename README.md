@@ -115,7 +115,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce --version` | Print the version, e.g. `rce 0.1.0`. Needs no token, config or network. |
 | `rce token set [--json]` | Store the RCE token in rk's file from a hidden prompt or stdin. `--json` prints `{"path": "<rk's file>"}`. |
 | `rce token status [--json]` | The token's owner, organisation, expiry, and trial minutes left. |
-| `rce device list [--running] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). |
+| `rce device list [--running] [--pool] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). `--pool` shows only the Pool's members, in `RCE_POOL` order, each with its Dev Snapshot's state (ready, not ready or missing: RCE deletes a Snapshot unused for 180 days), and "<free> of <members> free", a Free Cloud Device being one with no Run, pending or running. It sends only reads, one device list and one Snapshot read per member. A malformed `RCE_POOL` exits 2, as does a Retired Cloud Device in it; an RCE id RCE doesn't know exits 3. See [`device list --json`](#device-list---json). |
 | `rce device show <device> [--dev-password] [--json]` | One Cloud Device in detail. `--dev-password` also prints its stored Dev Password on stderr, bare and alone (never on stdout or in `--json`), so a pipe can take it into a CI secret; with none stored it exits 4. |
 | `rce device alias <device> <name> [--force] [--json]` | Give a Cloud Device a Device Name. A Cloud Device has one Device Name, so naming it again renames it. A name that already names another Cloud Device exits 2 unless `--force` moves it. A Device Name can't be all digits. <!-- glossary-ok: spec command name --> |
 | `rce device resolve <name> [--json]` | Print a Device Name's RCE id (`--json`: `{"id": 351, "type": "stb"}`). Reads only the per-user config, so it needs no token or network. |
@@ -201,6 +201,8 @@ A list of:
 ```
 
 `device_name` is the Cloud Device's Device Name, or `null` without one. `name` is its name on RCE. `type` is RCE's device type (`tv` or `stb`). `status` is `shutdown`, `pending` or `running`. `run` is `null` without an active Run. `run.created_at` is when the start was requested, which is when billing starts. RCE's WebRTC credentials for the Run are never included.
+
+With `--pool`, each object also has its Dev Snapshot from `RCE_POOL` and its state: `"dev_snapshot": {"id": 2001, "status": "ready"}`, where `status` is `ready`, `not_ready` (RCE is still saving it) or `missing` (RCE no longer has it: take a new one with `rce device setup-dev` and put its id in `RCE_POOL`).
 
 ### `device show --json`
 
@@ -343,7 +345,7 @@ The installer's own 401 (a Digest challenge) says "wrong or missing Dev Password
 
 ## Snapshots
 
-A Snapshot is saved Cloud Device state that a Run starts from. RCE gives every Cloud Device a `base` Snapshot (its factory state) and a `live` one (its state, saved at every stop). The Dev Snapshot is the one `rce device start` uses by default: the Cloud Device's state after developer mode and the Dev Password are set. It is recorded as `dev_snapshot_id` with the Device Name in the per-user config, so it needs a Device Name.
+A Snapshot is saved Cloud Device state that a Run starts from. RCE gives every Cloud Device a `base` Snapshot (its factory state) and a `live` one (its state, saved at every stop). The Dev Snapshot is the one `rce device start` uses by default: the Cloud Device's state after developer mode and the Dev Password are set. It is recorded as `dev_snapshot_id` with the Device Name in the per-user config, so it needs a Device Name. RCE deletes a Snapshot unused for 180 days, so a Dev Snapshot left unused that long is gone: take a new one with `rce device setup-dev`.
 
 `snapshot take` and `snapshot use-as-dev` change saved device state, so they ask first; only `--yes` skips the prompt.
 
@@ -537,8 +539,8 @@ Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Repla
 |---|---|
 | 0 | OK |
 | 1 | Other error: RCE unreachable or a server error (5xx); also a `device start` refused after RCE accepted it (a rejected token or rate limit while waiting for the Run), since that call made a Run |
-| 2 | Usage: bad arguments (including a port `forward` can't bridge, or a local port in use), no token configured, an unreadable per-user config, a Device Name already in use, a confirmation declined (or impossible without a terminal), or retiring a Cloud Device that is already retired |
-| 3 | Not found: device, Device Name or Snapshot (RCE's 404, or a 403 with no message, which means "not yours"); an ECP command or app the device doesn't have |
+| 2 | Usage: bad arguments (including a port `forward` can't bridge, or a local port in use), no token configured, an unreadable per-user config, a Device Name already in use, a confirmation declined (or impossible without a terminal), or retiring a Cloud Device that is already retired; a malformed `RCE_POOL`, or a Retired Cloud Device in it |
+| 3 | Not found: device, Device Name or Snapshot (RCE's 404, or a 403 with no message, which means "not yours"); an ECP command or app the device doesn't have; an `RCE_POOL` member RCE doesn't know |
 | 4 | Refused: rejected token (401), trial limit or trial used up, already running, not running, Cloud Device locked by another `rce`, quota, Snapshot limit, Snapshot not ready, rate limit that persists, and other 4xx; also retiring a Cloud Device that has a Run, a console that is unavailable (dev mode off), ECP refused by "Control by mobile apps" (403), a key the device didn't take, a Run that ends under `console` or `forward`, a wrong or missing Dev Password, a failed install, a screenshot with no dev app in the foreground, a `setup-dev` with no terminal to ask at (before it starts anything, or at a step that needs a person), and a `setup-dev` that fails its verification |
 | 5 | Timeout: RCE didn't answer, a Run or Snapshot wasn't ready (or a Run shut down) in time, or `console --until` saw no match in time |
 | 130 | Interrupted (Ctrl-C). A Run that `device start` asked for or was waiting on, or that `device setup-dev` started, is stopped first. |
@@ -552,6 +554,7 @@ A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff f
 | `RCE_TOKEN`, `RK_RCE_TOKEN` | Override the stored token (see above). |
 | `ROKU_RCE_CONFIG_PATH` | rk's config file, where `rce` reads the token and `rce token set` writes it. Default `~/roku-rce-config.json`. |
 | `RCE_API_URL` | Core API base URL. Default `https://api.rce.roku.com/api/v1`. Tests point it at the fake RCE. Where the token may go: see [Token](#token). |
+| `RCE_POOL` | The Pool, for `device list --pool`: a JSON object from each member's RCE id to its Dev Snapshot id, e.g. `{"375": 2001, "376": 2002}`. Keys are RCE ids (all digits), never Device Names, since a runner has none. |
 | `RCE_LOCK_OWNER` | A name recorded in the device lock, so a blocked caller sees who holds it (e.g. an agent's name). |
 | `RCE_DEV_PASSWORD` | The Dev Password for every command that signs in to the installer (sideload, screenshot, selftest), for whichever Cloud Device it addresses; it wins over a stored one. For pipelines: pipe it from `rce device show <device> --dev-password` into a CI secret (see [Pipelines](#pipelines-cicd)). `setup-dev` ignores it and stores its own. |
 
