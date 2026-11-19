@@ -16,6 +16,7 @@ import io
 import json
 import os
 import queue
+import random
 import re
 import secrets
 import shlex
@@ -27,7 +28,7 @@ import tomllib
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -57,6 +58,13 @@ class RceError(Exception):
         self.code = code
         self.rce_code = rce_code  # RCE's own error code, e.g. "trial_exhausted"
         self.status = status  # RCE's HTTP status, when RCE answered with an error
+
+
+class DeviceBusy(RceError):
+    """Exit 4: the Cloud Device already has a Run, or another local rce holds its lock."""
+
+    def __init__(self, message: str):
+        super().__init__(REFUSED, message)
 
 
 def write_private(path: Path, text: str) -> None:
@@ -496,7 +504,7 @@ def device_lock(ref: DeviceRef, wait: bool):
         except BlockingIOError:
             holder = f"{ref.display} is locked by {lock_holder(file)}"
             if not wait:
-                raise RceError(REFUSED, f"{holder}. Pass --wait-lock to wait for it.")
+                raise DeviceBusy(f"{holder}. Pass --wait-lock to wait for it.")
             print(f"rce: {holder}; waiting for it.", file=sys.stderr)
             fcntl.flock(file, fcntl.LOCK_EX)
         owner = {
@@ -654,7 +662,12 @@ def run_report(device: dict, device_name: str | None) -> dict:
 
 
 def start_refusal(api: CoreAPI, error: RceError, ref: DeviceRef, body: dict) -> RceError:
-    """RCE's refusal of a start, in plain words saying what to do (exit 4)."""
+    """RCE's refusal of a start, in plain words saying what to do (exit 4), keeping RCE's
+    status and code."""
+
+    def refused(message: str) -> RceError:
+        return RceError(REFUSED, message, error.rce_code, error.status)
+
     if error.rce_code == "trial_device_run_limit":
         names = device_names_by_id()
         running = [
@@ -662,8 +675,7 @@ def start_refusal(api: CoreAPI, error: RceError, ref: DeviceRef, body: dict) -> 
             for d in api.get("/devices", items=0)
             if has_run(d)
         ]
-        return RceError(
-            REFUSED,
+        return refused(
             "the RCE trial runs one Cloud Device at a time, and "
             f"{', '.join(running) or 'another Cloud Device'} is running. "
             "rce never stops it for you: stop it with `rce device stop <device>` "
@@ -678,19 +690,17 @@ def start_refusal(api: CoreAPI, error: RceError, ref: DeviceRef, body: dict) -> 
         "trial time you have left. Lower it; `rce usage` shows the minutes left.",
     }
     if error.rce_code in messages:
-        return RceError(REFUSED, messages[error.rce_code])
+        return refused(messages[error.rce_code])
     if error.status == 400 and error.rce_code is None:  # RCE gives over-cap no code
         most = api.get("/user/me")["organisation"]["max_project_runtime"]
         if body["max_runtime"] > most:
-            return RceError(
-                REFUSED,
+            return refused(
                 f"--max-runtime {body['max_runtime']} s is more than your organisation's "
                 f"maximum of {most} s ({most / 3600:g} h). Lower it.",
             )
     if error.code != REFUSED:
         return error
-    return RceError(
-        REFUSED,
+    return refused(
         f"RCE refused to start {ref.display}: {error}. Check that --max-runtime "
         "is within your organisation's maximum, --firmware fits the device type, and the "
         "Cloud Device isn't already running or busy.",
@@ -797,6 +807,130 @@ def start_snapshot(api: CoreAPI, snapshot: int | None, ref: DeviceRef) -> int:
         f"state (Snapshot {live}). It may not be in developer mode."
     )
     return live
+
+
+@dataclass(frozen=True)
+class StartOptions:
+    """How to start a Run: `device start`'s flags, and their defaults."""
+
+    snapshot: int | None = None  # None: the Dev Snapshot, else the latest live state
+    firmware: str | None = None  # None: the latest for the device type
+    max_runtime: int = DEFAULT_MAX_RUNTIME
+    wait: bool = True  # until the Run takes input; else only until RCE shows the Run
+    timeout: float = DEFAULT_START_TIMEOUT
+
+
+class CommandRun:
+    """The Run of one rce command, as `command_run` hands it back."""
+
+    def __init__(
+        self, api: CoreAPI, ref: DeviceRef, adopt: bool, leave_unknown_start: bool = False
+    ):
+        self.api, self.ref, self.adopt = api, ref, adopt
+        # Leave a start RCE may have taken (`start_unknown`) to the caller: its error is
+        # passed on, and neither it nor Ctrl-C before RCE accepted the start looks or stops.
+        self.leave_unknown_start = leave_unknown_start
+        self.device: dict | None = None  # the Cloud Device as RCE last gave it
+        # The start was sent and RCE's answer didn't say whether it took it: none yet,
+        # none at all, or a gateway error.
+        self.start_unknown = False
+        self.started = False  # RCE accepted this command's start
+        self.adopted = False  # the Run was already going, and this command uses it
+        self.stop_tried = False  # a stop was asked for, whether or not it worked
+
+    def start(self, options: StartOptions, announce=None) -> dict:
+        """Adopt the Cloud Device's Run or refuse (exit 4), or ask RCE for one; then wait
+        until RCE shows it or, with `options.wait`, until it takes input. `announce` gets
+        "start" or "adopt" before any wait."""
+        api, ref = self.api, self.ref
+        device = get_device(api, ref)
+        if has_run(device):
+            if not self.adopt:
+                raise DeviceBusy(
+                    f"{ref.display} is already {device['status']}. "
+                    f"See it with `rce device status {ref.arg}`.",
+                )
+            self.adopted = True
+            if announce:
+                announce("adopt")
+            if options.wait:
+                device = wait_until_ready(api, ref, options.timeout)
+            self.device = device
+            return device
+        if announce:
+            announce("start")
+        body = {
+            "snapshot_id": start_snapshot(api, options.snapshot, ref),
+            "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
+            "max_runtime": options.max_runtime,
+        }
+        try:
+            self.start_unknown = True
+            try:
+                api.request("POST", f"/devices/{ref.id}/start", json=body)
+            except RceError as error:
+                if error.status not in (None, *GATEWAY_ERRORS):
+                    self.start_unknown = False
+                    raise start_refusal(api, error, ref, body)
+                if self.leave_unknown_start:  # RCE may have made a Run
+                    raise
+                raise start_uncertain(api, ref, error)
+            self.start_unknown = False
+            self.started = True
+            wait = wait_until_ready if options.wait else wait_for_run
+            try:
+                self.device = wait(api, ref, options.timeout)
+                return self.device
+            except Exception as error:  # the Run must not keep billing
+                self._stop_after_failure()
+                if isinstance(error, RceError) and error.code == REFUSED:  # 4 means no Run was made
+                    raise RceError(ERROR, str(error), error.rce_code, error.status) from error
+                raise
+        except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
+            if self.started or not self.leave_unknown_start:
+                self._stop_after_failure()  # Stop first: a check could race RCE accepting it.
+            raise
+
+    def stop(self, wait: bool = False) -> dict:
+        """Stop the Run, as `stop_run` does. Tried once: the block's end sends no other."""
+        self.stop_tried = True
+        self.device = stop_run(self.api, self.ref, wait)
+        return self.device
+
+    def _stop_after_failure(self) -> None:
+        """Today's stop after a failed start, with its messages; tried once."""
+        self.stop_tried = True
+        stop_after_failed_start(self.api, self.ref)
+
+
+@contextmanager
+def command_run(
+    api: CoreAPI,
+    ref: DeviceRef,
+    keep: bool,
+    adopt: bool,
+    wait_lock: bool,
+    leave_unknown_start: bool = False,
+):
+    """A Run's whole life inside one rce command, under the device lock.
+
+    Entering takes the lock and starts nothing: `start()` gets the Run going and
+    `stop()` ends it. When the block ends, a Run this command started is stopped
+    unless `keep`, or a stop was already tried. `leave_unknown_start`: see `CommandRun`.
+    """
+    with device_lock(ref, wait_lock):
+        run = CommandRun(api, ref, adopt, leave_unknown_start)
+        try:
+            yield run
+        finally:
+            if not keep and run.started and not run.stop_tried:
+                run._stop_after_failure()
+
+
+def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
+    """`CommandRun.start` for callers that hold the device lock themselves (setup-dev,
+    selftest) until they move onto `command_run`."""
+    return CommandRun(api, ref, adopt=False).start(options)
 
 
 # -- a running Cloud Device ----------------------------------------------------
@@ -1150,6 +1284,185 @@ def confirm(args: argparse.Namespace, question: str) -> None:
     print(f"{question} [y/N] ", end="", file=sys.stderr, flush=True)
     if sys.stdin.readline().strip().lower() not in ("y", "yes"):
         raise RceError(USAGE, "cancelled")
+
+
+# -- Pools ---------------------------------------------------------------------
+
+
+POOL_VAR = "RCE_POOL"  # a JSON map from each member's RCE id to its Dev Snapshot id
+
+
+def read_pool() -> dict[int, int]:
+    """The Pool from RCE_POOL: each member's RCE id -> its Dev Snapshot id, in RCE_POOL order.
+
+    Exit 2 for anything but a non-empty JSON object of all-digit RCE ids to integer
+    Snapshot ids. It sends nothing, so a typo costs no request.
+    """
+    shape = 'a JSON object from each RCE id to its Dev Snapshot id, e.g. {"375": 2001}'
+    text = os.environ.get(POOL_VAR)
+    if text is None:
+        raise RceError(USAGE, f"{POOL_VAR} is not set: set it to {shape}.")
+    try:
+        pool = json.loads(text)
+    except ValueError as error:
+        raise RceError(USAGE, f"{POOL_VAR} is not JSON ({error}): set it to {shape}.")
+    if not isinstance(pool, dict):
+        raise RceError(USAGE, f"{POOL_VAR} is not a JSON object: set it to {shape}.")
+    if not pool:
+        raise RceError(USAGE, f"{POOL_VAR} is empty: name at least one Cloud Device in it.")
+    for key, snapshot in pool.items():
+        if not is_raw_id(key):
+            raise RceError(
+                USAGE,
+                f"{POOL_VAR} key {key!r} is not an RCE id: a Pool names each Cloud Device "
+                "by its RCE id (all digits), not a Device Name.",
+            )
+        if type(snapshot) is not int:
+            raise RceError(
+                USAGE, f"{POOL_VAR} value for {key} is not a Snapshot id (an integer): {snapshot!r}."
+            )
+    return {int(key): snapshot for key, snapshot in pool.items()}
+
+
+def pool_members(api: CoreAPI, pool: dict[int, int]) -> list[dict]:
+    """A look at the Pool: its Cloud Devices from one device list, in RCE_POOL order, as
+    `device list` shows them (with their Device Names).
+
+    Exit 3 naming each member RCE doesn't know; exit 2 for a Retired Cloud Device.
+    """
+    names = device_names_by_id()
+    by_id = {d["id"]: device_summary(d, names.get(d["id"])) for d in api.get("/devices", items=0)}
+    if unknown := [str(id) for id in pool if id not in by_id]:
+        raise RceError(
+            NOT_FOUND, f"{POOL_VAR} names Cloud Devices RCE doesn't know: {', '.join(unknown)}."
+        )
+    members = [by_id[id] for id in pool]
+    for device in members:
+        if device["name"].startswith(RETIRED_PREFIX):
+            raise RceError(
+                USAGE,
+                f"Cloud Device {device['id']} is retired (named {device['name']!r}): "
+                f"remove it from {POOL_VAR}.",
+            )
+    return members
+
+
+POOL_LOOK_VAR = "RCE_POOL_LOOK_SECONDS"  # test-only: the time between --wait-free looks
+POOL_LOOK_SECONDS = 15.0  # between --wait-free looks, plus up to a third more at random
+
+
+def claim(
+    api: CoreAPI, pool: dict[int, int], options: StartOptions, wait_free: float | None
+) -> tuple[DeviceRef, dict]:
+    """The Claim (ADR-0002): a look at the Cloud Devices, then a start of each Free Cloud
+    Device of the Pool in shuffled order, from its own Dev Snapshot, until RCE accepts one.
+    With `wait_free`, look again until that many seconds have passed. Returns the claimed
+    Cloud Device and the Run as `CommandRun.start` left it."""
+    deadline = time.monotonic() + (wait_free or 0)
+    while True:
+        members = pool_members(api, pool)
+        free = [DeviceRef(d["id"], d["device_name"]) for d in members if not has_run(d)]
+        if claimed := claim_free(api, pool, options, free):
+            return claimed
+        if wait_free is None:
+            raise RceError(
+                REFUSED, f"no Free Cloud Device in the Pool ({len(members)} members, none free)"
+            )
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise RceError(
+                TIMEOUT,
+                f"no Free Cloud Device in the Pool in {wait_free:g} s ({len(members)} members); "
+                "nothing started",
+            )
+        print(f"rce: {len(free)} of {len(members)} free, waiting…", file=sys.stderr)
+        interval = float(os.environ.get(POOL_LOOK_VAR) or POOL_LOOK_SECONDS)
+        # The random part keeps callers waiting together from all looking at once.
+        time.sleep(min(interval * (1 + random.random() / 3), left))
+
+
+def claim_free(
+    api: CoreAPI, pool: dict[int, int], options: StartOptions, free: list[DeviceRef]
+) -> tuple[DeviceRef, dict] | None:
+    """One pass of the Claim over the Free Cloud Devices a look found; None when every one
+    was busy or skipped."""
+    random.shuffle(free)  # so callers starting together don't all try the same one first
+    for ref in free:
+        run = None
+        try:
+            # Other callers start the members too: a Run found after a start RCE may have
+            # taken may be theirs, so that start is left alone (ADR-0002).
+            with command_run(
+                api, ref, keep=True, adopt=False, wait_lock=False, leave_unknown_start=True
+            ) as run:
+                run.start(replace(options, snapshot=pool[ref.id]))
+            return ref, run.device
+        except KeyboardInterrupt:
+            if run and run.start_unknown:
+                warn(
+                    f"{ref.display}: interrupted before RCE answered its start; rce stopped "
+                    "nothing. RCE may have made a Run, which bills until its --max-runtime."
+                )
+            raise
+        except RceError as error:
+            if run and run.started:
+                raise  # after the Claim: `device start`'s rules
+            if member_busy(error):
+                continue  # skip it silently
+            warning = skip_warning(error, ref, pool[ref.id], bool(run and run.start_unknown))
+            if warning is None:
+                raise  # a refusal every member would get: the Claim stops
+            warn(warning)  # skip it with a warning
+    return None
+
+
+def member_busy(error: RceError) -> bool:
+    """Whether a Pool member's start failed because it is busy: a Run or the device lock
+    found before the start, or RCE's 409 "already running or locked"."""
+    return isinstance(error, DeviceBusy) or (error.status == 409 and error.rce_code is None)
+
+
+def skip_warning(
+    error: RceError, ref: DeviceRef, snapshot_id: int, start_unknown: bool
+) -> str | None:
+    """The warning naming a Pool member skipped because RCE may have taken its start (no
+    answer, or a gateway error) or its Dev Snapshot needs fixing; None for any other
+    failure. A Run found after an unknown start may be another job's Claim, so rce
+    neither looks nor stops."""
+    if start_unknown:
+        if error.status:
+            answer = f"answered its start with {error.status}"
+        else:
+            answer = f"gave its start no answer ({error})"
+        return (
+            f"{ref.display}: RCE {answer}; skipped. RCE may have made a Run anyway, which "
+            "bills until its --max-runtime and keeps this member busy."
+        )
+    if error.rce_code == "snapshot_not_ready":
+        return f"{ref.display}: its Dev Snapshot {snapshot_id} is not ready (RCE is saving it); skipped."
+    if error.status == 404:  # RCE's answer for a deleted Snapshot is unverified
+        return f"{missing_dev_snapshot(ref, snapshot_id)} Skipped."
+    return None
+
+
+def dev_snapshot_status(api: CoreAPI, device_id: int, snapshot_id: int) -> str:
+    """A Pool member's Dev Snapshot: `ready`, `not_ready` (RCE still saving it) or `missing`."""
+    try:
+        snapshot = api.get(f"/devices/{device_id}/snapshots/{snapshot_id}")
+    except RceError as error:
+        if error.code != NOT_FOUND:
+            raise
+        return "missing"
+    return "ready" if snapshot["ready"] else "not_ready"
+
+
+def missing_dev_snapshot(ref: DeviceRef, snapshot_id: int) -> str:
+    """What to do about a Pool member whose Dev Snapshot RCE no longer has."""
+    return (
+        f"{ref.display}: Dev Snapshot {snapshot_id} is missing "
+        "(RCE deletes a Snapshot unused for 180 days); take a new one with "
+        f"`rce device setup-dev {ref.arg}` and put its id in {POOL_VAR}."
+    )
 
 
 # -- dev setup -----------------------------------------------------------------
@@ -1686,25 +1999,53 @@ def cmd_token_status(args: argparse.Namespace) -> None:
     emit(args, status, table(rows))
 
 
+LIST_HEADER = ["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN"]
+
+
+def list_row(device: dict) -> list[str]:
+    """A `device_summary` as a row of the `device list` table."""
+    return [
+        str(device["id"]),
+        device["device_name"] or "-",
+        device["name"],
+        device["type"],
+        device["status"],
+        f"since {device['run']['created_at']}" if device["run"] else "-",
+    ]
+
+
 def cmd_device_list(args: argparse.Namespace) -> None:
+    if args.pool:
+        return list_pool(args)
     names = device_names_by_id()
     devices = [device_summary(d, names.get(d["id"])) for d in CoreAPI().get("/devices", items=0)]
     if args.running:
         devices = [d for d in devices if has_run(d)]
     if not devices:
         return emit(args, [], "No running Cloud Devices." if args.running else "No Cloud Devices.")
-    rows = [["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN"]] + [
-        [
-            str(d["id"]),
-            d["device_name"] or "-",
-            d["name"],
-            d["type"],
-            d["status"],
-            f"since {d['run']['created_at']}" if d["run"] else "-",
-        ]
-        for d in devices
+    emit(args, devices, table([LIST_HEADER] + [list_row(d) for d in devices]))
+
+
+def list_pool(args: argparse.Namespace) -> None:
+    """`device list --pool`: the Pool's members, each Dev Snapshot's state, and how many are free."""
+    pool = read_pool()
+    api = CoreAPI()
+    members = pool_members(api, pool)
+    free = sum(not has_run(d) for d in members)
+    shown = [d for d in members if has_run(d)] if args.running else members
+    for d in shown:
+        snapshot = pool[d["id"]]
+        d["dev_snapshot"] = {"id": snapshot, "status": dev_snapshot_status(api, d["id"], snapshot)}
+    rows = [LIST_HEADER + ["DEV SNAPSHOT"]] + [
+        list_row(d) + [f"{d['dev_snapshot']['id']} {d['dev_snapshot']['status'].replace('_', ' ')}"]
+        for d in shown
     ]
-    emit(args, devices, table(rows))
+    missing = [
+        missing_dev_snapshot(DeviceRef(d["id"], d["device_name"]), d["dev_snapshot"]["id"])
+        for d in shown
+        if d["dev_snapshot"]["status"] == "missing"
+    ]
+    emit(args, shown, "\n".join([table(rows), *missing, f"{free} of {len(members)} free"]))
 
 
 def cmd_device_show(args: argparse.Namespace) -> None:
@@ -1757,65 +2098,56 @@ def cmd_device_resolve(args: argparse.Namespace) -> None:
     emit(args, {"id": ref.id, "type": entry["type"]}, str(ref.id))
 
 
-@dataclass(frozen=True)
-class StartOptions:
-    """How to start a Run: `device start`'s flags, and their defaults."""
-
-    snapshot: int | None = None  # None: the Dev Snapshot, else the latest live state
-    firmware: str | None = None  # None: the latest for the device type
-    max_runtime: int = DEFAULT_MAX_RUNTIME
-    wait: bool = True  # until the Run takes input; else only until RCE shows the Run
-    timeout: float = DEFAULT_START_TIMEOUT
-
-
-def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
-    """Ask RCE for a Run and wait until RCE shows it or, with `options.wait`, until it
-    takes input."""
-    device = get_device(api, ref)
-    if has_run(device):
+def check_start_flags(args: argparse.Namespace) -> None:
+    """Exit 2 for `device start` with no Cloud Device to start, or `--pool` with a flag
+    that contradicts it."""
+    if not args.pool:
+        if args.device is None:
+            raise RceError(USAGE, "name a <device>, or pass --pool to claim one from the Pool.")
+        if args.wait_free is not None:
+            raise RceError(
+                USAGE, "--wait-free waits for a Free Cloud Device of the Pool: pass --pool too."
+            )
+        return
+    if args.wait_free is not None and not args.wait_free > 0:
         raise RceError(
-            REFUSED,
-            f"{ref.display} is already {device['status']}. "
-            f"See it with `rce device status {ref.arg}`.",
+            USAGE, f"--wait-free takes a number of seconds above 0, not {args.wait_free:g}."
         )
-    body = {
-        "snapshot_id": start_snapshot(api, options.snapshot, ref),
-        "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
-        "max_runtime": options.max_runtime,
+    given = {
+        "<device>": args.device is not None,
+        "--snapshot": args.snapshot is not None,
+        "--wait-lock": args.wait_lock,
     }
-    try:
-        try:
-            api.request("POST", f"/devices/{ref.id}/start", json=body)
-        except RceError as error:
-            if error.status in (None, *GATEWAY_ERRORS):  # RCE may have made a Run
-                raise start_uncertain(api, ref, error)
-            raise start_refusal(api, error, ref, body)
-        wait = wait_until_ready if options.wait else wait_for_run
-        try:
-            return wait(api, ref, options.timeout)
-        except Exception as error:  # the Run must not keep billing
-            stop_after_failed_start(api, ref)
-            if isinstance(error, RceError) and error.code == REFUSED:  # 4 means no Run was made
-                raise RceError(ERROR, str(error), error.rce_code, error.status) from error
-            raise
-    except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
-        stop_after_failed_start(api, ref)  # Stop first: a check could race RCE accepting it.
-        raise
+    clash = next((flag for flag, present in given.items() if present), None)
+    if clash:
+        raise RceError(
+            USAGE,
+            f"--pool takes no {clash}: it picks a Free Cloud Device, starts it from its Dev "
+            f"Snapshot in {POOL_VAR}, and skips one another rce has locked.",
+        )
 
 
 def cmd_device_start(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    check_start_flags(args)
+    pool = read_pool() if args.pool else None
+    ref = None if args.pool else resolve_device(args.device)
     api = CoreAPI()
-    with device_lock(ref, args.wait_lock):
-        options = StartOptions(
-            args.snapshot, args.firmware, args.max_runtime, not args.no_wait, args.timeout
-        )
-        report = run_report(start_run(api, ref, options), ref.name)
+    options = StartOptions(
+        args.snapshot, args.firmware, args.max_runtime, not args.no_wait, args.timeout
+    )
+    if pool:
+        ref, device = claim(api, pool, options, args.wait_free)
+        claimed = f"Claimed Cloud Device {ref.id} (Run {device['running_device']['id']})\n"
+    else:
+        with command_run(api, ref, keep=True, adopt=False, wait_lock=args.wait_lock) as run:
+            run.start(options)
+        device, claimed = run.device, ""
+    report = run_report(device, ref.name)
     state = "is running" if report["status"] == "running" else "is starting"
     emit(
         args,
         report,
-        f"{ref.display} {state}: Run {report['run']['id']}, "
+        f"{claimed}{ref.display} {state}: Run {report['run']['id']}, "
         f"{usd(report['hourly_cost_usd'])}/h, "
         f"auto-stops around {local_time(parse_time(report['auto_stop_at']))}. "
         f"Stop it with `rce device stop {ref.arg}`.",
@@ -1875,6 +2207,8 @@ def cmd_device_stop(args: argparse.Namespace) -> None:
     api = CoreAPI()
     with device_lock(ref, args.wait_lock):
         device = get_device(api, ref)
+        if args.run is not None and (device.get("running_device") or {}).get("id") != args.run:
+            raise RceError(REFUSED, f"Run {args.run} already ended; nothing stopped.")
         require_run(device, ref)
         report = run_report(device, ref.name)  # the Run being stopped
         device = stop_run(api, ref, args.wait, args.timeout)
@@ -2424,6 +2758,9 @@ def parser() -> argparse.ArgumentParser:
     device_cmds = device.add_subparsers(dest="command", required=True)
     listing = device_cmds.add_parser("list", parents=[output], help="list Cloud Devices")
     listing.add_argument("--running", action="store_true", help="only Cloud Devices with a Run")
+    listing.add_argument(
+        "--pool", action="store_true", help=f"only the Pool's members (${POOL_VAR}) and how many are free"
+    )
     listing.set_defaults(func=cmd_device_list)
 
     show = device_cmds.add_parser("show", parents=[output], help="one Cloud Device in detail")
@@ -2453,7 +2790,16 @@ def parser() -> argparse.ArgumentParser:
     )
 
     start = device_cmds.add_parser("start", parents=[output, locking], help="start a Run")
-    start.add_argument("device", help="Device Name or RCE id")
+    start.add_argument("device", nargs="?", help="Device Name or RCE id (none with --pool)")
+    start.add_argument(
+        "--pool", action="store_true", help=f"claim a Free Cloud Device of the Pool (${POOL_VAR})"
+    )
+    start.add_argument(
+        "--wait-free",
+        type=float,
+        metavar="S",
+        help="with --pool: look again about every 15 s until a member is free, for up to S s",
+    )
     start.add_argument("--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot)")
     start.add_argument("--firmware", help="firmware version id (default: the latest)")
     start.add_argument(
@@ -2472,6 +2818,9 @@ def parser() -> argparse.ArgumentParser:
 
     stop = device_cmds.add_parser("stop", parents=[output, locking], help="end a Run")
     stop.add_argument("device", help="Device Name or RCE id")
+    stop.add_argument(
+        "--run", type=int, metavar="ID", help="stop only while this Run is the current one"
+    )
     stop.add_argument("--wait", action="store_true", help="wait until it has shut down")
     stop.add_argument(
         "--timeout", type=float, default=DEFAULT_STOP_TIMEOUT, help="seconds to wait (--wait)"

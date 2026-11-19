@@ -115,7 +115,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce --version` | Print the version, e.g. `rce 0.1.0`. Needs no token, config or network. |
 | `rce token set [--json]` | Store the RCE token in rk's file from a hidden prompt or stdin. `--json` prints `{"path": "<rk's file>"}`. |
 | `rce token status [--json]` | The token's owner, organisation, expiry, and trial minutes left. |
-| `rce device list [--running] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). |
+| `rce device list [--running] [--pool] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). `--pool` shows only the Pool's members, in `RCE_POOL` order, each with its Dev Snapshot's state (ready, not ready or missing: RCE deletes a Snapshot unused for 180 days), and "<free> of <members> free", a Free Cloud Device being one with no Run, pending or running. It sends only reads, one device list and one Snapshot read per member. A malformed `RCE_POOL` exits 2, as does a Retired Cloud Device in it; an RCE id RCE doesn't know exits 3. See [`device list --json`](#device-list---json). |
 | `rce device show <device> [--dev-password] [--json]` | One Cloud Device in detail. `--dev-password` also prints its stored Dev Password on stderr, bare and alone (never on stdout or in `--json`), so a pipe can take it into a CI secret; with none stored it exits 4. |
 | `rce device alias <device> <name> [--force] [--json]` | Give a Cloud Device a Device Name. A Cloud Device has one Device Name, so naming it again renames it. A name that already names another Cloud Device exits 2 unless `--force` moves it. A Device Name can't be all digits. <!-- glossary-ok: spec command name --> |
 | `rce device resolve <name> [--json]` | Print a Device Name's RCE id (`--json`: `{"id": 351, "type": "stb"}`). Reads only the per-user config, so it needs no token or network. |
@@ -123,7 +123,8 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce device retire <device> [--yes] [--json]` | Retire a Cloud Device: rename it on RCE with a `retired/` prefix and drop its Device Name. It asks first unless `--yes` (no terminal means no, exit 2). Refuses a Cloud Device with a Run, pending or running (exit 4): stop it first. One already retired (its RCE name starts with `retired/`) exits 2 and is left as it is. |
 | `rce device delete` | Not possible: RCE can't delete Cloud Devices. Exits 2 and points to `retire`. |
 | `rce device start <device> [--snapshot ID] [--firmware ID] [--max-runtime S] [--no-wait] [--timeout S] [--wait-lock] [--json]` | Start a Run and wait until it takes input. See [Runs](#runs). |
-| `rce device stop <device> [--wait] [--timeout S] [--wait-lock] [--json]` | End the Run and say what it cost. `--wait` waits until the Cloud Device has shut down (default timeout 120 s). Exits 4 if it isn't running. |
+| `rce device start --pool [--wait-free S] [--firmware ID] [--max-runtime S] [--no-wait] [--timeout S] [--json]` | Claim a Free Cloud Device of the Pool (`RCE_POOL`) by starting it, then go on as `device start` does, with the same output plus "Claimed Cloud Device <id> (Run <run id>)". With none free it exits 4 at once; `--wait-free S` looks again about every 15 s, for up to S seconds, then exits 5 with nothing started. No queue and no fairness. See [Claiming from a Pool](#claiming-from-a-pool). |
+| `rce device stop <device> [--run ID] [--wait] [--timeout S] [--wait-lock] [--json]` | End the Run and say what it cost. `--run` stops it only while Run `ID` is the current one: with another Run or none it exits 4, "Run ID already ended; nothing stopped", and sends no stop. `--wait` waits until the Cloud Device has shut down (default timeout 120 s). Exits 4 if it isn't running. |
 | `rce device status <device> [--json]` | The Cloud Device's state and, during a Run, its start time, cap, auto-stop time, elapsed time and elapsed cost. |
 | `rce usage [--json]` | Trial minutes used and left, or, once subscribed, the minutes billed this month. |
 | `rce key <device> <key>… [--delay MS] [--json]` | Press remote keys in order on a running Cloud Device. See [Using a running Cloud Device](#using-a-running-cloud-device). |
@@ -202,6 +203,8 @@ A list of:
 
 `device_name` is the Cloud Device's Device Name, or `null` without one. `name` is its name on RCE. `type` is RCE's device type (`tv` or `stb`). `status` is `shutdown`, `pending` or `running`. `run` is `null` without an active Run. `run.created_at` is when the start was requested, which is when billing starts. RCE's WebRTC credentials for the Run are never included.
 
+With `--pool`, each object also has its Dev Snapshot from `RCE_POOL` and its state: `"dev_snapshot": {"id": 2001, "status": "ready"}`, where `status` is `ready`, `not_ready` (RCE is still saving it) or `missing` (RCE no longer has it: take a new one with `rce device setup-dev` and put its id in `RCE_POOL`).
+
 ### `device show --json`
 
 The `device list` object plus:
@@ -248,6 +251,18 @@ When RCE refuses a start, `rce` says why in plain words and exits 4: the trial's
 Cost is RCE's price, $0.00333333 per device-minute (AWS Marketplace), times the minutes since the start was requested.
 
 Each Run has its own address, which `rce` always takes from the Core API's answer for that Run, never from a fixed host. Commands that need a Run exit 4 and say so when the Cloud Device isn't running.
+
+### Claiming from a Pool
+
+`rce device start --pool` lets parallel jobs each get a Cloud Device without assigning them. It reads the Pool from `RCE_POOL`, looks at the Cloud Devices once (one device list), shuffles the Free Cloud Devices among the members (those with no Run, pending or running), and starts each in turn from its own Dev Snapshot in `RCE_POOL`, with your `--firmware` and `--max-runtime`, until RCE accepts one. That accepted start is the Claim: RCE refuses a start on a Cloud Device that already has a Run, so two callers never claim the same one. There is no queue and no fairness. Each member is tried at most once per look.
+
+- **Skipped, then the next member tried:** RCE's 409 "already running or locked" (another job claimed it after the look), a Snapshot that isn't ready (with a warning naming the Cloud Device), a member whose device lock another local `rce` holds, a start answered with a gateway error (502, 503 or 504) or with no answer at all, and a member whose Dev Snapshot RCE no longer has (both with a warning naming the Cloud Device). After a gateway error or no answer `rce` neither looks at that member nor stops anything there, since a Run on it may be another job's Claim; if RCE did make a Run all the same, it bills until its cap and keeps that member busy, so keep `--max-runtime` short.
+- **Ctrl-C before RCE answers a start** exits 130 and stops nothing, for the same reason, with a warning that RCE may have made a Run that bills until its cap. Ctrl-C after the Claim still stops its Run.
+- **The Claim stops at once, exit 4, nothing started:** a rejected token (401), a used-up trial, the trial's one-Run limit, or a cap over the trial time left or over the organisation's maximum, in the same plain words as `device start`, after one start request.
+- **No member claimed:** exit 4, "no Free Cloud Device in the Pool (N members, none free)".
+- **`--wait-free S`:** instead of exit 4, look again about every 15 s, plus a random 0 to 5 s so callers waiting together don't all look at once, and try the Free Cloud Devices again, until one is claimed or S seconds have passed since the call began; then exit 5 with nothing started. Each look says "<free> of <members> free, waiting…" on stderr; `--json` stdout is unchanged. A refusal that stops the Claim ends the wait at once with exit 4, and Ctrl-C while waiting exits 130 with nothing started. There is no queue and no fairness: whichever caller looks first after a member frees takes it, so a caller can wait its full S seconds while others claim.
+- **After the Claim** it is `device start`: it waits unless `--no-wait`, and stops the Run if the wait fails, times out or is interrupted (exit 1, 5 or 130, never 4). It never tries a second member after RCE accepted a start, so one call makes at most one Run. `--json` prints what `device start --json` does, so `id` and `run.id` say what was claimed, with `--no-wait` too.
+- **Exit 2 before anything is sent:** `--pool` with a `<device>`, `--snapshot` or `--wait-lock`, `device start` with neither a `<device>` nor `--pool`, `--wait-free` without `--pool` or with S not above 0, and a malformed `RCE_POOL`. After the look, a Retired Cloud Device in `RCE_POOL` exits 2 and an RCE id RCE doesn't know exits 3, before any start.
 
 ### Device lock
 
@@ -343,7 +358,7 @@ The installer's own 401 (a Digest challenge) says "wrong or missing Dev Password
 
 ## Snapshots
 
-A Snapshot is saved Cloud Device state that a Run starts from. RCE gives every Cloud Device a `base` Snapshot (its factory state) and a `live` one (its state, saved at every stop). The Dev Snapshot is the one `rce device start` uses by default: the Cloud Device's state after developer mode and the Dev Password are set. It is recorded as `dev_snapshot_id` with the Device Name in the per-user config, so it needs a Device Name.
+A Snapshot is saved Cloud Device state that a Run starts from. RCE gives every Cloud Device a `base` Snapshot (its factory state) and a `live` one (its state, saved at every stop). The Dev Snapshot is the one `rce device start` uses by default: the Cloud Device's state after developer mode and the Dev Password are set. It is recorded as `dev_snapshot_id` with the Device Name in the per-user config, so it needs a Device Name. RCE deletes a Snapshot unused for 180 days, so a Dev Snapshot left unused that long is gone: take a new one with `rce device setup-dev`.
 
 `snapshot take` and `snapshot use-as-dev` change saved device state, so they ask first; only `--yes` skips the prompt.
 
@@ -484,6 +499,10 @@ on:
 concurrency:
   group: rce-${{ vars.RCE_DEVICE }}   # one job at a time on this Cloud Device
 
+defaults:
+  run:
+    shell: bash   # adds pipefail, so `| tee` keeps rce's exit code
+
 jobs:
   roku:
     runs-on: ubuntu-latest
@@ -508,8 +527,9 @@ jobs:
         id: start
         run: |
           status=0
-          rce device start "$RCE_DEVICE" --snapshot "$RCE_SNAPSHOT" --max-runtime 1500 --json || status=$?
+          rce device start "$RCE_DEVICE" --snapshot "$RCE_SNAPSHOT" --max-runtime 1500 --json | tee start.json || status=$?
           if [ "$status" -eq 4 ]; then echo "refused=true" >> "$GITHUB_OUTPUT"; fi   # no Run of ours to stop
+          if [ "$status" -eq 0 ]; then echo "run=$(jq .run.id start.json)" >> "$GITHUB_OUTPUT"; fi   # the Run to stop
           exit "$status"
       - name: Sideload and wait for the app
         run: |
@@ -520,16 +540,121 @@ jobs:
           wait "$console"
       - name: Stop the Run
         if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.start.outcome) && steps.start.outputs.refused != 'true'
-        run: rce device stop "$RCE_DEVICE" --json
+        env:
+          RCE_RUN: ${{ steps.start.outputs.run }}
+        run: |
+          if [ -z "$RCE_RUN" ]; then exit 0; fi   # the start failed and dealt with any Run it made
+          rce device stop "$RCE_DEVICE" --run "$RCE_RUN" --json
 ```
 
-Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Replace `app ready` with a line your app prints when it is ready.
+Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Replace `app ready` with a line your app prints when it is ready. Keep `shell: bash`: without it GitHub runs each step with `bash -e`, which has no `pipefail`, so the start step's `| tee` would hide a refused start's exit 4.
 
-- **One Cloud Device per pipeline.** The `concurrency` group serialises this pipeline's jobs on its Cloud Device. The device lock can't do it: it only coordinates `rce` processes on one machine, and each job runs on its own runner. Give the pipeline its own Cloud Device and don't use it yourself: the stop step stops whatever Run is on that Cloud Device.
-- **The stop step stops only a Run this job may have started.** It runs once the start step has run (its `outcome` is `success`, `failure` or `cancelled`), even after a failed later step or a cancelled job, since `if: always()` keeps it. It skips when the start step never ran (an earlier step failed, or the job was cancelled first: its `outcome` is `skipped`), and when the start was refused: `rce device start` exits 4 only when RCE refused the start, or the Cloud Device was already running or locked, so that call made no Run; the Run on the Cloud Device, if any, is someone else's. The start step records that (`refused=true`). Any other way the start can fail may have made a Run, so the stop runs then; a start step that is cancelled or killed records nothing.
+- **One Cloud Device per pipeline.** The `concurrency` group serialises this pipeline's jobs on its Cloud Device. The device lock can't do it: it only coordinates `rce` processes on one machine, and each job runs on its own runner. Give the pipeline its own Cloud Device and don't use it yourself: a start of yours is refused while the job's Run is on, and the job's start is refused while yours is.
+- **The stop step stops only a Run this job may have started.** It runs once the start step has run (its `outcome` is `success`, `failure` or `cancelled`), even after a failed later step or a cancelled job, since `if: always()` keeps it. It skips when the start step never ran (an earlier step failed, or the job was cancelled first: its `outcome` is `skipped`), and when the start was refused: `rce device start` exits 4 only when RCE refused the start, or the Cloud Device was already running or locked, so that call made no Run; the Run on the Cloud Device, if any, is someone else's. The start step records that (`refused=true`). Any other way the start can fail may have made a Run, so the stop step runs then (see `--run` below for what it stops); a start step that is cancelled or killed records nothing.
+- **`--run` keeps the stop to this job's Run.** The start step records the started Run's id (`run`), and the stop step passes it with `--run`: if the Cloud Device's current Run has another id, or there is none, `rce device stop --run` exits 4 with "Run <id> already ended; nothing stopped" and sends no stop. So when this job's Run reaches its cap and someone else then starts one, this job doesn't stop theirs. A start that fails after RCE accepted it records no id, and then the stop step does nothing, on purpose: `rce device start` stops the Run it made once, and if that stop fails it says how to stop it; `--max-runtime` bounds whatever is left; and a stop without `--run` would reopen the race `--run` closes, stopping a Run someone else started since. `--run` leaves a small race: `rce` reads the Cloud Device, then stops it, and RCE's stop takes no Run id, so a start by someone else between the two is stopped.
 - **Only the newest waiting job runs.** GitHub keeps at most one running and one pending job per `concurrency` group: a newer push cancels the older pending job, while the running job finishes. Adding `cancel-in-progress: true` to the group also cancels the running job; its stop step still runs once its start step has run, since `if: always()` covers a cancelled job.
 - **One Run at a time.** The trial allows one Run at a time across the organisation, so while a job's Run is going any other start, from another pipeline or from you at a terminal, is refused (exit 4).
 - **A killed job bills until the cap.** If the runner dies before the stop step runs, the Run bills until its cap: 60 minutes by default, or `--max-runtime` (25 minutes above, a little over the job's `timeout-minutes`). `rce device list --running` shows a Run left on.
+
+### Parallel jobs on a Pool
+
+Jobs that run at the same time each claim a Free Cloud Device from a Pool (see [Claiming from a Pool](#claiming-from-a-pool)), so there is no `concurrency` group. A person sets up each member once, from a terminal, with `rce device setup-dev` (see [Dev setup](#dev-setup)). Then, in GitHub, under your organisation's Settings > Secrets and variables > Actions, add the variable `RCE_POOL` (each member's RCE id to its Dev Snapshot id, e.g. `{"375": 2001, "376": 2002}`, from `rce snapshot list <member>`) and the secrets `RCE_TOKEN` and `RCE_DEV_PASSWORDS`, a JSON object from each member's RCE id to its Dev Password, e.g. `{"375": "<its Dev Password>", "376": "<its Dev Password>"}`.
+
+With `RCE_POOL` set in your terminal too, `rce device list --pool` shows each member, its Dev Snapshot's state and how many are free.
+
+```yaml
+name: roku
+
+on:
+  push:
+
+defaults:
+  run:
+    shell: bash   # adds pipefail, so `| tee` keeps rce's exit code
+
+jobs:
+  roku:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        suite: [smoke, playback, settings]   # one job per suite, all at once
+    env:
+      RCE_TOKEN: ${{ secrets.RCE_TOKEN }}
+      RCE_POOL: ${{ vars.RCE_POOL }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Install rce
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/rce" https://raw.githubusercontent.com/oscarsanchez/rce-cli/v0.1.0/bin/rce
+          chmod +x "$RUNNER_TEMP/bin/rce"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: zip -r app.zip manifest source components images   # your build
+      - name: Start the Run
+        id: start
+        run: |
+          status=0
+          rce device start --pool --wait-free 300 --max-runtime 1500 --json | tee start.json || status=$?
+          if [ "$status" -eq 4 ]; then echo "refused=true" >> "$GITHUB_OUTPUT"; fi   # no Run of ours to stop
+          if [ "$status" -eq 0 ]; then
+            echo "id=$(jq .id start.json)" >> "$GITHUB_OUTPUT"   # the claimed Cloud Device
+            echo "run=$(jq .run.id start.json)" >> "$GITHUB_OUTPUT"   # the Run to stop
+          fi
+          exit "$status"
+      - name: Take its Dev Password
+        env:
+          RCE_DEV_PASSWORDS: ${{ secrets.RCE_DEV_PASSWORDS }}
+          RCE_ID: ${{ steps.start.outputs.id }}
+        run: |
+          password=$(jq -er --arg id "$RCE_ID" '.[$id]' <<< "$RCE_DEV_PASSWORDS")   # fails if it has none
+          echo "::add-mask::$password"   # first, so no later output shows it
+          echo "RCE_DEV_PASSWORD=$password" >> "$GITHUB_ENV"
+      - name: Sideload and wait for the app
+        env:
+          RCE_ID: ${{ steps.start.outputs.id }}
+        run: |
+          rce console "$RCE_ID" --until 'app ready' --timeout 120 --strip-ansi &
+          console=$!
+          rce sideload "$RCE_ID" app.zip
+          rce launch "$RCE_ID"
+          wait "$console"
+      - name: Stop the Run
+        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.start.outcome) && steps.start.outputs.refused != 'true'
+        env:
+          RCE_ID: ${{ steps.start.outputs.id }}
+          RCE_RUN: ${{ steps.start.outputs.run }}
+        run: |
+          if [ -z "$RCE_RUN" ]; then exit 0; fi   # the start failed and dealt with any Run it made
+          rce device stop "$RCE_ID" --run "$RCE_RUN" --json
+```
+
+The matrix starts its three jobs at once, and each claims its own member. The start, password and stop steps are what make it safe to copy:
+
+- **The start step records the claimed Cloud Device and its Run.** As in the recipe above it records `refused=true` on exit 4 and still fails, and on success it records `id` and `run.id` from `--json`. Every later step addresses `$RCE_ID`, the Cloud Device this job claimed.
+- **The password step masks before it exports.** GitHub masks a secret's whole value, not a value taken out of it, so the step picks the claimed member's Dev Password out of `RCE_DEV_PASSWORDS` with `jq`, runs `::add-mask::` on it first, and only then exports it as `RCE_DEV_PASSWORD` for the later steps. It never echoes the value. A member missing from the map fails the step, and the stop step still runs.
+- **The stop step stops only this job's Run.** It has the same `always()` and refused-start guard as the recipe above, and passes the claimed `run.id` with `--run`: once this job's Run reaches its cap another job may claim the member, and `--run` leaves that Run alone, except in the small race between `rce`'s read and its stop (see the `--run` bullet above). With no `run.id` recorded it does nothing, for the reasons in that bullet.
+
+What a Pool can and can't do:
+
+- **No fairness.** There is no queue: whichever job looks first after a member frees takes it, so a job can wait its full `--wait-free` (300 s above, about every 15 s) while others claim, then fail with exit 5 with nothing started. The wait counts against `timeout-minutes`.
+- **A killed job holds its member until the cap.** If the runner dies before the stop step, the Run bills and keeps that member busy until `--max-runtime`, so keep it just above `timeout-minutes` (25 minutes above, for a 20-minute job). `rce device list --pool` shows which members are free.
+- **A start answered with a gateway error (502, 503 or 504), or not at all, may have made a Run.** `rce` skips that member and stops nothing there, since the Run on it may be another job's Claim; so does a job cancelled while its start awaits RCE's answer. If RCE did make a Run all the same, it bills and holds the member until its cap, as a killed job's does: another reason for a short `--max-runtime`.
+- **RCE deletes a Snapshot unused for 180 days.** A member whose Dev Snapshot is gone is skipped with a warning, and `rce device list --pool` shows its Dev Snapshot as missing: run `rce device setup-dev` on it again and put the new Dev Snapshot's id in `RCE_POOL`.
+- **A Pool runs in parallel only on a subscription.** The trial allows one Run at a time across the organisation, so a second job's Claim is refused (exit 4) while the first job's Run is on.
+- **Each member needs a person's setup.** A new member needs `rce device setup-dev`, by a person at a terminal, then its RCE id and Dev Snapshot id in `RCE_POOL` and its Dev Password in `RCE_DEV_PASSWORDS`.
+- **Static sharding needs no `--pool`.** With a fixed number of jobs, give job N Cloud Device N: the recipe above with `RCE_DEVICE` and `RCE_SNAPSHOT` taken from the matrix, and one `concurrency` group per Cloud Device (`rce-${{ matrix.device }}`). Nothing waits or claims, but a Cloud Device that is busy or broken fails its own job.
+
+For a clean console on each pass, stop the Run and wait for it to shut down, then claim again:
+
+```sh
+rce device stop "$RCE_ID" --run "$RCE_RUN" --wait
+rce device start --pool --wait-free 300 --max-runtime 1500 --json
+```
+
+The second Claim may land on another member, so take `id` and `run.id` from its output again, address the new `id` from then on (with its own Dev Password), and have the stop step stop the new Run.
 
 ## Exit codes
 
@@ -537,10 +662,10 @@ Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Repla
 |---|---|
 | 0 | OK |
 | 1 | Other error: RCE unreachable or a server error (5xx); also a `device start` refused after RCE accepted it (a rejected token or rate limit while waiting for the Run), since that call made a Run |
-| 2 | Usage: bad arguments (including a port `forward` can't bridge, or a local port in use), no token configured, an unreadable per-user config, a Device Name already in use, a confirmation declined (or impossible without a terminal), or retiring a Cloud Device that is already retired |
-| 3 | Not found: device, Device Name or Snapshot (RCE's 404, or a 403 with no message, which means "not yours"); an ECP command or app the device doesn't have |
-| 4 | Refused: rejected token (401), trial limit or trial used up, already running, not running, Cloud Device locked by another `rce`, quota, Snapshot limit, Snapshot not ready, rate limit that persists, and other 4xx; also retiring a Cloud Device that has a Run, a console that is unavailable (dev mode off), ECP refused by "Control by mobile apps" (403), a key the device didn't take, a Run that ends under `console` or `forward`, a wrong or missing Dev Password, a failed install, a screenshot with no dev app in the foreground, a `setup-dev` with no terminal to ask at (before it starts anything, or at a step that needs a person), and a `setup-dev` that fails its verification |
-| 5 | Timeout: RCE didn't answer, a Run or Snapshot wasn't ready (or a Run shut down) in time, or `console --until` saw no match in time |
+| 2 | Usage: bad arguments (including a port `forward` can't bridge, or a local port in use), no token configured, an unreadable per-user config, a Device Name already in use, a confirmation declined (or impossible without a terminal), or retiring a Cloud Device that is already retired; a malformed `RCE_POOL`, or a Retired Cloud Device in it; `device start --pool` with a `<device>`, `--snapshot` or `--wait-lock`, or `device start` with neither a `<device>` nor `--pool`; `--wait-free` without `--pool`, or with S not above 0 |
+| 3 | Not found: device, Device Name or Snapshot (RCE's 404, or a 403 with no message, which means "not yours"); an ECP command or app the device doesn't have; an `RCE_POOL` member RCE doesn't know |
+| 4 | Refused, and for `device start` (with or without `--pool`) always "this call made no Run": rejected token (401), trial limit or trial used up, already running, no Free Cloud Device in the Pool (without `--wait-free`; with it, those refusals end the wait at once), not running, Cloud Device locked by another `rce`, quota, Snapshot limit, Snapshot not ready, rate limit that persists, and other 4xx; also retiring a Cloud Device that has a Run, a console that is unavailable (dev mode off), ECP refused by "Control by mobile apps" (403), a key the device didn't take, a Run that ends under `console` or `forward`, a `device stop --run` whose Run already ended, a wrong or missing Dev Password, a failed install, a screenshot with no dev app in the foreground, a `setup-dev` with no terminal to ask at (before it starts anything, or at a step that needs a person), and a `setup-dev` that fails its verification |
+| 5 | Timeout: RCE didn't answer, a Run or Snapshot wasn't ready (or a Run shut down) in time, `console --until` saw no match in time, or `device start --pool --wait-free S` claimed nothing in S seconds (nothing started; no fairness, so a caller may wait it out while others claim) |
 | 130 | Interrupted (Ctrl-C). A Run that `device start` asked for or was waiting on, or that `device setup-dev` started, is stopped first. |
 
 A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff for any request; other 429s are retried only on reads. A passing gateway error (502, 503 or 504) on a Core API read, such as `device list`, `device status` or the waits inside `device start`, is retried the same way; one that persists exits 1. Writes are never retried on a 5xx, so one command never makes two Runs. Requests to a device's own ports (the installer, ECP) are never retried: the device's answer passes through as is, so it can't prove the request didn't reach the device.
@@ -552,6 +677,8 @@ A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff f
 | `RCE_TOKEN`, `RK_RCE_TOKEN` | Override the stored token (see above). |
 | `ROKU_RCE_CONFIG_PATH` | rk's config file, where `rce` reads the token and `rce token set` writes it. Default `~/roku-rce-config.json`. |
 | `RCE_API_URL` | Core API base URL. Default `https://api.rce.roku.com/api/v1`. Tests point it at the fake RCE. Where the token may go: see [Token](#token). |
+| `RCE_POOL` | The Pool, for `device list --pool` and `device start --pool`: a JSON object from each member's RCE id to its Dev Snapshot id, e.g. `{"375": 2001, "376": 2002}`. Keys are RCE ids (all digits), never Device Names, since a runner has none. |
+| `RCE_POOL_LOOK_SECONDS` | Test-only: the seconds between `--wait-free` looks (default 15, plus up to a third more at random), so the tests run fast. Not for pipelines. |
 | `RCE_LOCK_OWNER` | A name recorded in the device lock, so a blocked caller sees who holds it (e.g. an agent's name). |
 | `RCE_DEV_PASSWORD` | The Dev Password for every command that signs in to the installer (sideload, screenshot, selftest), for whichever Cloud Device it addresses; it wins over a stored one. For pipelines: pipe it from `rce device show <device> --dev-password` into a CI secret (see [Pipelines](#pipelines-cicd)). `setup-dev` ignores it and stores its own. |
 
