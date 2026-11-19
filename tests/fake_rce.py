@@ -29,7 +29,8 @@ Extending it in later tickets:
   `NO_ANSWER.status` never sends it (closing the connection after `start_delay`),
   a gateway error (502, 503, 504) answers that though the Run was made;
 - a Pool: `one_run_at_a_time = False` (a subscription), `take_after(method, path, id)`
-  for a Cloud Device another job claims mid-call, `delete_snapshot` for a Snapshot gone;
+  for a Cloud Device another job claims mid-call, `free_after(method, path, id, times)`
+  for one whose Run another job stops, `delete_snapshot` for a Snapshot gone;
 - inspect traffic: `self.requests` records every request the fake received.
 - a Run address elsewhere: `address_origin` replaces this server in instance_api_url
   (another host, scheme or port, or no scheme).
@@ -366,6 +367,7 @@ class FakeRCE:
         self.proxied: list[Request] = []  # what `rce` sent toward any other host (see above)
         self._scripted: list[tuple[str, str, Response]] = []
         self._takes: list[tuple[str, str, int]] = []  # see take_after
+        self._frees: list[list] = []  # [method, path, device id, requests left]: see free_after
         self.deleted_snapshots: set[int] = set()  # see delete_snapshot
         self._next_run_id = 9000
         self._next_device_id = 400
@@ -482,6 +484,12 @@ class FakeRCE:
         starts a Run on the Cloud Device: a lost race, as two jobs claiming at once see."""
         self._takes.append((method, path, device_id))
 
+    def free_after(self, method: str, path: str, device_id: int, times: int = 1) -> None:
+        """Once the fake has answered the next `times` requests to METHOD path, the Run on
+        the Cloud Device ends, as when another job stops it: a member a waiting caller sees
+        free on a later look."""
+        self._frees.append([method, path, device_id, times])
+
     def add_snapshot(self, device_id: int, snapshot_id: int, ready: bool = True) -> dict:
         """Give a Cloud Device another Snapshot, e.g. its Dev Snapshot; `ready=False` while
         RCE is still saving it. One it doesn't have reads as 404 (a deleted Snapshot)."""
@@ -543,6 +551,13 @@ class FakeRCE:
             device = copy.deepcopy(self.devices[take[2]])  # the answer may hold the old one
             self._give_run(device, f"uuid-{device['id']}-taken")
             self.devices[device["id"]] = device
+        for free in [f for f in self._frees if f[:2] == [request.method, request.path]]:
+            free[3] -= 1
+            if not free[3]:
+                self._frees.remove(free)
+                device = copy.deepcopy(self.devices[free[2]])  # the answer may hold the old one
+                device.update(status="shutdown", running_device=None)
+                self.devices[device["id"]] = device
         return response
 
     def _answer(self, request: Request) -> Response:
