@@ -1,4 +1,4 @@
-# Roku RCE
+# rce-cli
 
 A command-line tool and agent skill for using Roku Cloud Emulator from any Roku project.
 
