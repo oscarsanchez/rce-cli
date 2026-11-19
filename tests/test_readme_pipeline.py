@@ -16,7 +16,8 @@ from conftest import REPO
 COMMAND = re.compile(r"(?<![\w/.-])rce((?: [a-z][\w-]*){1,2})([^|]*)")  # flags up to a pipe
 START, STOP = "Start the Run", "Stop the Run"  # the recipes' step names
 DEVICE = "device"  # the recipe for one Cloud Device, before the section's subsections
-RECIPES = (DEVICE,)
+POOL = "Parallel jobs on a Pool"  # the Pool recipe's subsection
+RECIPES = (DEVICE, POOL)
 
 
 def pipeline_section() -> str:
@@ -27,7 +28,8 @@ def pipeline_section() -> str:
 
 
 def workflow(recipe: str) -> str:
-    part = pipeline_section().split("\n### ")[0]
+    parts = pipeline_section().split("\n### ")
+    part = parts[0] if recipe == DEVICE else next((p for p in parts if p.startswith(recipe)), "")
     block = re.search(r"```yaml\n(.*?)```", part, re.S)
     assert block, f"the {recipe} recipe has no yaml block"
     return block.group(1)
@@ -55,6 +57,7 @@ def recipe_steps(recipe: str) -> dict[str, dict[str, str]]:
 class Step(NamedTuple):
     code: int
     outputs: dict[str, str]  # what it wrote to $GITHUB_OUTPUT
+    exported: list[str]  # what it wrote to $GITHUB_ENV, for the job's later steps
     calls: list[str]  # the arguments of each `rce` call
     stdout: str
     stderr: str
@@ -67,10 +70,11 @@ def run_step(
     exit_code: int = 0,
     stdout: str = "",
     start_outputs: dict[str, str] | None = None,
+    secrets: dict[str, str] | None = None,
 ) -> Step:
     """Run one of the recipe's steps the way GitHub runs a step, with an `rce` that prints
     `stdout` and exits `exit_code`, and the step's `env:` filled from the start step's
-    outputs."""
+    outputs and the secrets."""
     steps = recipe_steps(recipe)
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
@@ -79,15 +83,16 @@ def run_step(
     printed.write_text(stdout)
     (bin_ / "rce").write_text(f'#!/bin/sh\necho "$*" >> {calls}\ncat {printed}\nexit {exit_code}\n')
     (bin_ / "rce").chmod(0o755)
-    outputs = tmp_path / "github_output"
+    outputs, exported = tmp_path / "github_output", tmp_path / "github_env"
     outputs.write_text("")
+    exported.write_text("")
     start_id = steps[START]["id"]
+    context = {
+        **{f"steps.{start_id}.outputs.{key}": value for key, value in (start_outputs or {}).items()},
+        **{f"secrets.{key}": value for key, value in (secrets or {}).items()},
+    }
     variables = {
-        variable: re.sub(
-            rf"\$\{{\{{ steps\.{start_id}\.outputs\.(\w+) \}}\}}",
-            lambda output: (start_outputs or {}).get(output[1], ""),
-            value,
-        )
+        variable: re.sub(r"\$\{\{ ([\w.]+) \}\}", lambda expression: context.get(expression[1], ""), value)
         for variable, value in steps[name].get("variables", {}).items()
     }
     step = subprocess.run(
@@ -96,6 +101,7 @@ def run_step(
             **os.environ,
             "PATH": f"{bin_}:{os.environ['PATH']}",
             "GITHUB_OUTPUT": str(outputs),
+            "GITHUB_ENV": str(exported),
             "RCE_DEVICE": "351",
             **variables,
         },
@@ -106,13 +112,14 @@ def run_step(
     return Step(
         step.returncode,
         dict(line.split("=", 1) for line in outputs.read_text().splitlines()),
+        exported.read_text().splitlines(),
         calls.read_text().splitlines(),
         step.stdout,
         step.stderr,
     )
 
 
-STARTED = {DEVICE: 351}  # the id `rce device start` names, by recipe
+STARTED = {DEVICE: 351, POOL: 375}  # the id `rce device start` names: the Pool's isn't RCE_DEVICE
 
 
 def started(recipe: str) -> str:
@@ -161,6 +168,44 @@ def test_a_start_records_the_id_of_the_run_it_started(tmp_path):
     start = run_step(tmp_path, DEVICE, START, 0, started(DEVICE))
     assert start.code == 0
     assert start.outputs == {"run": "9000"}
+
+
+def test_a_claim_records_the_cloud_device_and_the_run_it_claimed(tmp_path):
+    start = run_step(tmp_path, POOL, START, 0, started(POOL))
+    assert start.code == 0
+    assert start.outputs == {"id": "375", "run": "9000"}
+
+
+PASSWORD = "Take its Dev Password"  # the Pool recipe's step that sets RCE_DEV_PASSWORD
+PASSWORDS = json.dumps({"376": "other-member", "375": "s3cret-375"})
+
+
+def test_the_claimed_cloud_devices_password_is_masked_before_it_is_exported(tmp_path):
+    """GitHub doesn't mask a value taken out of a JSON secret: only `::add-mask::` hides it
+    from the job's later output, so it must come before anything that could print it."""
+    password = run_step(
+        tmp_path, POOL, PASSWORD, start_outputs={"id": "375"}, secrets={"RCE_DEV_PASSWORDS": PASSWORDS}
+    )
+    assert password.code == 0
+    assert password.stdout == "::add-mask::s3cret-375\n"
+    assert "s3cret" not in password.stderr
+    assert password.exported == ["RCE_DEV_PASSWORD=s3cret-375"]
+
+
+def test_a_claimed_cloud_device_with_no_password_fails_the_step_and_prints_none(tmp_path):
+    password = run_step(
+        tmp_path, POOL, PASSWORD, start_outputs={"id": "377"}, secrets={"RCE_DEV_PASSWORDS": PASSWORDS}
+    )
+    assert password.code != 0
+    assert not re.search("other-member|s3cret", password.stdout + password.stderr)
+    assert password.exported == []
+
+
+def test_the_sideload_and_console_address_the_claimed_cloud_device(tmp_path):
+    sideload = run_step(tmp_path, POOL, "Sideload and wait for the app", start_outputs={"id": "375"})
+    assert sideload.code == 0
+    assert {call.split()[0] for call in sideload.calls} == {"console", "sideload", "launch"}
+    assert {call.split()[1] for call in sideload.calls} == {"375"}
 
 
 @pytest.mark.parametrize("recipe", RECIPES)
