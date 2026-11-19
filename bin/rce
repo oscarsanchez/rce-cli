@@ -799,6 +799,110 @@ def start_snapshot(api: CoreAPI, snapshot: int | None, ref: DeviceRef) -> int:
     return live
 
 
+@dataclass(frozen=True)
+class StartOptions:
+    """How to start a Run: `device start`'s flags, and their defaults."""
+
+    snapshot: int | None = None  # None: the Dev Snapshot, else the latest live state
+    firmware: str | None = None  # None: the latest for the device type
+    max_runtime: int = DEFAULT_MAX_RUNTIME
+    wait: bool = True  # until the Run takes input; else only until RCE shows the Run
+    timeout: float = DEFAULT_START_TIMEOUT
+
+
+class CommandRun:
+    """The Run of one rce command, as `command_run` hands it back."""
+
+    def __init__(self, api: CoreAPI, ref: DeviceRef, adopt: bool):
+        self.api, self.ref, self.adopt = api, ref, adopt
+        self.device: dict | None = None  # the Cloud Device as RCE last gave it
+        self.started = False  # RCE accepted this command's start
+        self.adopted = False  # the Run was already going, and this command uses it
+        self.stop_tried = False  # a stop was asked for, whether or not it worked
+
+    def start(self, options: StartOptions, announce=None) -> dict:
+        """Adopt the Cloud Device's Run or refuse (exit 4), or ask RCE for one; then wait
+        until RCE shows it or, with `options.wait`, until it takes input. `announce` gets
+        "start" or "adopt" before any wait."""
+        api, ref = self.api, self.ref
+        device = get_device(api, ref)
+        if has_run(device):
+            if not self.adopt:
+                raise RceError(
+                    REFUSED,
+                    f"{ref.display} is already {device['status']}. "
+                    f"See it with `rce device status {ref.arg}`.",
+                )
+            self.adopted = True
+            if announce:
+                announce("adopt")
+            if options.wait:
+                device = wait_until_ready(api, ref, options.timeout)
+            self.device = device
+            return device
+        if announce:
+            announce("start")
+        body = {
+            "snapshot_id": start_snapshot(api, options.snapshot, ref),
+            "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
+            "max_runtime": options.max_runtime,
+        }
+        try:
+            try:
+                api.request("POST", f"/devices/{ref.id}/start", json=body)
+            except RceError as error:
+                if error.status in (None, *GATEWAY_ERRORS):  # RCE may have made a Run
+                    raise start_uncertain(api, ref, error)
+                raise start_refusal(api, error, ref, body)
+            self.started = True
+            wait = wait_until_ready if options.wait else wait_for_run
+            try:
+                self.device = wait(api, ref, options.timeout)
+                return self.device
+            except Exception as error:  # the Run must not keep billing
+                self._stop_after_failure()
+                if isinstance(error, RceError) and error.code == REFUSED:  # 4 means no Run was made
+                    raise RceError(ERROR, str(error), error.rce_code, error.status) from error
+                raise
+        except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
+            self._stop_after_failure()  # Stop first: a check could race RCE accepting it.
+            raise
+
+    def stop(self, wait: bool = False) -> dict:
+        """Stop the Run, as `stop_run` does. Tried once: the block's end sends no other."""
+        self.stop_tried = True
+        self.device = stop_run(self.api, self.ref, wait)
+        return self.device
+
+    def _stop_after_failure(self) -> None:
+        """Today's stop after a failed start, with its messages; tried once."""
+        self.stop_tried = True
+        stop_after_failed_start(self.api, self.ref)
+
+
+@contextmanager
+def command_run(api: CoreAPI, ref: DeviceRef, keep: bool, adopt: bool, wait_lock: bool):
+    """A Run's whole life inside one rce command, under the device lock.
+
+    Entering takes the lock and starts nothing: `start()` gets the Run going and
+    `stop()` ends it. When the block ends, a Run this command started is stopped
+    unless `keep`, or a stop was already tried.
+    """
+    with device_lock(ref, wait_lock):
+        run = CommandRun(api, ref, adopt)
+        try:
+            yield run
+        finally:
+            if not keep and run.started and not run.stop_tried:
+                run._stop_after_failure()
+
+
+def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
+    """`CommandRun.start` for callers that hold the device lock themselves (setup-dev,
+    selftest) until they move onto `command_run`."""
+    return CommandRun(api, ref, adopt=False).start(options)
+
+
 # -- a running Cloud Device ----------------------------------------------------
 
 
@@ -1866,60 +1970,15 @@ def cmd_device_resolve(args: argparse.Namespace) -> None:
     emit(args, {"id": ref.id, "type": entry["type"]}, str(ref.id))
 
 
-@dataclass(frozen=True)
-class StartOptions:
-    """How to start a Run: `device start`'s flags, and their defaults."""
-
-    snapshot: int | None = None  # None: the Dev Snapshot, else the latest live state
-    firmware: str | None = None  # None: the latest for the device type
-    max_runtime: int = DEFAULT_MAX_RUNTIME
-    wait: bool = True  # until the Run takes input; else only until RCE shows the Run
-    timeout: float = DEFAULT_START_TIMEOUT
-
-
-def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
-    """Ask RCE for a Run and wait until RCE shows it or, with `options.wait`, until it
-    takes input."""
-    device = get_device(api, ref)
-    if has_run(device):
-        raise RceError(
-            REFUSED,
-            f"{ref.display} is already {device['status']}. "
-            f"See it with `rce device status {ref.arg}`.",
-        )
-    body = {
-        "snapshot_id": start_snapshot(api, options.snapshot, ref),
-        "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
-        "max_runtime": options.max_runtime,
-    }
-    try:
-        try:
-            api.request("POST", f"/devices/{ref.id}/start", json=body)
-        except RceError as error:
-            if error.status in (None, *GATEWAY_ERRORS):  # RCE may have made a Run
-                raise start_uncertain(api, ref, error)
-            raise start_refusal(api, error, ref, body)
-        wait = wait_until_ready if options.wait else wait_for_run
-        try:
-            return wait(api, ref, options.timeout)
-        except Exception as error:  # the Run must not keep billing
-            stop_after_failed_start(api, ref)
-            if isinstance(error, RceError) and error.code == REFUSED:  # 4 means no Run was made
-                raise RceError(ERROR, str(error), error.rce_code, error.status) from error
-            raise
-    except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
-        stop_after_failed_start(api, ref)  # Stop first: a check could race RCE accepting it.
-        raise
-
-
 def cmd_device_start(args: argparse.Namespace) -> None:
     ref = resolve_device(args.device)
     api = CoreAPI()
-    with device_lock(ref, args.wait_lock):
-        options = StartOptions(
-            args.snapshot, args.firmware, args.max_runtime, not args.no_wait, args.timeout
-        )
-        report = run_report(start_run(api, ref, options), ref.name)
+    options = StartOptions(
+        args.snapshot, args.firmware, args.max_runtime, not args.no_wait, args.timeout
+    )
+    with command_run(api, ref, keep=True, adopt=False, wait_lock=args.wait_lock) as run:
+        run.start(options)
+    report = run_report(run.device, ref.name)
     state = "is running" if report["status"] == "running" else "is starting"
     emit(
         args,
