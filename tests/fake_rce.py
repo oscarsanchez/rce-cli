@@ -366,8 +366,8 @@ class FakeRCE:
         self.requests: list[Request] = []
         self.proxied: list[Request] = []  # what `rce` sent toward any other host (see above)
         self._scripted: list[tuple[str, str, Response]] = []
-        self._takes: list[tuple[str, str, int]] = []  # see take_after
-        self._frees: list[list] = []  # [method, path, device id, requests left]: see free_after
+        # [method, path, requests left, device id, change]: see take_after, free_after
+        self._changes_after: list[list] = []
         self.deleted_snapshots: set[int] = set()  # see delete_snapshot
         self._next_run_id = 9000
         self._next_device_id = 400
@@ -482,13 +482,22 @@ class FakeRCE:
     def take_after(self, method: str, path: str, device_id: int) -> None:
         """Once the fake has answered the next request to METHOD path, another caller
         starts a Run on the Cloud Device: a lost race, as two jobs claiming at once see."""
-        self._takes.append((method, path, device_id))
+        self._change_after(
+            method, path, 1, device_id, lambda d: self._give_run(d, f"uuid-{d['id']}-taken")
+        )
 
     def free_after(self, method: str, path: str, device_id: int, times: int = 1) -> None:
         """Once the fake has answered the next `times` requests to METHOD path, the Run on
         the Cloud Device ends, as when another job stops it: a member a waiting caller sees
         free on a later look."""
-        self._frees.append([method, path, device_id, times])
+        self._change_after(
+            method, path, times, device_id, lambda d: d.update(status="shutdown", running_device=None)
+        )
+
+    def _change_after(self, method: str, path: str, times: int, device_id: int, change) -> None:
+        """Once the fake has answered the next `times` requests to METHOD path, `change`
+        the Cloud Device as another caller would."""
+        self._changes_after.append([method, path, times, device_id, change])
 
     def add_snapshot(self, device_id: int, snapshot_id: int, ready: bool = True) -> dict:
         """Give a Cloud Device another Snapshot, e.g. its Dev Snapshot; `ready=False` while
@@ -546,17 +555,12 @@ class FakeRCE:
 
     def _handle(self, request: Request) -> Response:
         response = self._answer(request)
-        for take in [t for t in self._takes if t[:2] == (request.method, request.path)]:
-            self._takes.remove(take)
-            device = copy.deepcopy(self.devices[take[2]])  # the answer may hold the old one
-            self._give_run(device, f"uuid-{device['id']}-taken")
-            self.devices[device["id"]] = device
-        for free in [f for f in self._frees if f[:2] == [request.method, request.path]]:
-            free[3] -= 1
-            if not free[3]:
-                self._frees.remove(free)
-                device = copy.deepcopy(self.devices[free[2]])  # the answer may hold the old one
-                device.update(status="shutdown", running_device=None)
+        for after in [a for a in self._changes_after if a[:2] == [request.method, request.path]]:
+            after[2] -= 1
+            if not after[2]:
+                self._changes_after.remove(after)
+                device = copy.deepcopy(self.devices[after[3]])  # the answer may hold the old one
+                after[4](device)
                 self.devices[device["id"]] = device
         return response
 
