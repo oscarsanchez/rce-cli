@@ -9,14 +9,15 @@ README there lists what the fake still invents, and why.
 
 Device lifecycle, as RCE runs it: `POST .../start` puts a Cloud Device in
 `pending` with a Run that has no address yet. Its 202 shows no Run
-(`running_device: null`, as on Run 4615), and reads of the Cloud Device show none
-for `run_hidden_reads` more reads (default 0: the next read shows it). After `boot_delay` seconds it is
-`running`, its Run has an address on this server, and that address's
-`input/ready` answers true after a further `input_delay`. `POST .../stop` takes
-it to `shutdown` after `stop_delay`. The delays default to 0 so tests stay
-fast; raise one to exercise a wait or a timeout. Transitions happen when a
-request arrives, so the fake needs no timers. Like the trial, it runs one Cloud
-Device at a time (429 trial_device_run_limit).
+(`running_device: null`, as on Run 4615), and reads of the Cloud Device show
+none for `run_hidden_reads` more reads (default 0: the next read shows it).
+After `boot_delay` seconds it is `running`, its Run has an address on this
+server, and that address's `input/ready` answers true after a further
+`input_delay`. `POST .../stop` takes it to `shutdown` after `stop_delay`. The
+delays default to 0 so tests stay fast; raise one to exercise a wait or a
+timeout. Transitions happen when a request arrives, so the fake needs no
+timers. Like the trial, it runs one Cloud Device at a time (429
+trial_device_run_limit).
 
 Extending it in later tickets:
 - add a route: append (METHOD, path regex, handler) to `self.routes`; a handler
@@ -24,9 +25,9 @@ Extending it in later tickets:
   `INSTANCE_API` and can find their Run with `run_for(uuid)`;
 - force an error or rate limit: `fail_next(method, path, Response(...))`, or
   close the connection without answering: `fail_next(method, path, NO_ANSWER)`;
-- an accepted start: `start_delay` holds its answer, `start_status` sets it: 0 never
-  sends it (closing the connection after `start_delay`), 503 answers RCE's documented
-  503 though the Run was made;
+- an accepted start: `start_delay` holds its answer, `start_status` sets it:
+  `NO_ANSWER.status` never sends it (closing the connection after `start_delay`),
+  a gateway error (502, 503, 504) answers that though the Run was made;
 - inspect traffic: `self.requests` records every request the fake received.
 - a Run address elsewhere: `address_origin` replaces this server in instance_api_url
   (another host, scheme or port, or no scheme).
@@ -75,6 +76,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -370,7 +372,7 @@ class FakeRCE:
         self.input_delay = 0.0
         self.stop_delay = 0.0
         self.start_delay = 0.0  # an accepted start's answer is held this long
-        self.start_status = 202  # an accepted start's answer; 0: none (see above)
+        self.start_status = 202  # an accepted start's answer; NO_ANSWER.status: none
         self.run_hidden_reads = 0  # reads after a start that still show no Run; math.inf: never
         self._hidden_reads: dict[int, float] = {}  # device id -> reads left that show no Run
         self.snapshot_delay = 0.0  # a new Snapshot is ready this long after it is taken
@@ -617,7 +619,8 @@ class FakeRCE:
         self._due[device["id"]] = ("running", time.monotonic() + self.boot_delay)
         self._hidden_reads[device["id"]] = self.run_hidden_reads
         if self.start_status != 202:
-            return Response(self.start_status, {"detail": "Service Unavailable"}, delay=self.start_delay)
+            detail = HTTPStatus(self.start_status).phrase if self.start_status else ""
+            return Response(self.start_status, {"detail": detail}, delay=self.start_delay)
         answer = device | {"running_device": None}  # as live RCE answers (Run 4615)
         return Response(202, answer, delay=self.start_delay)
 

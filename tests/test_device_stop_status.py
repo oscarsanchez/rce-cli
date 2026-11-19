@@ -70,7 +70,7 @@ def test_stopping_a_device_that_is_not_running_says_so(rce, fake_rce):
     assert not fake_rce.requests_to("POST", STOP)
 
 
-def test_a_stop_answered_503_fails_once_as_today(rce, fake_rce):
+def test_a_stop_answered_503_fails_once(rce, fake_rce):
     """Only a start takes the careful path on a 503; a stop is neither retried nor checked."""
     running_player(rce, fake_rce)
     fake_rce.fail_next("POST", STOP, Response(503, {"detail": "Service Unavailable"}))

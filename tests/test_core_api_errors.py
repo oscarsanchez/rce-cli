@@ -99,8 +99,11 @@ def test_a_gateway_error_on_a_write_is_not_retried(rce, fake_rce):
     start = "/api/v1/devices/351/start"
     fake_rce.fail_next("POST", start, Response(503, "upstream connect error"), times=2)
 
-    rce.run("device", "start", "351")
+    result = rce.run("device", "start", "351")
 
+    assert result.returncode == 1
+    assert "RCE answered 503: upstream connect error" in result.stderr
+    assert "has no Run: the start didn't happen" in result.stderr
     assert len(fake_rce.requests_to("POST", start)) == 1  # one start never makes two Runs
 
 
