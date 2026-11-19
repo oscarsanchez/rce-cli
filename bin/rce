@@ -1310,18 +1310,18 @@ def read_pool() -> dict[int, int]:
         raise RceError(USAGE, f"{POOL_VAR} is not a JSON object: set it to {shape}.")
     if not pool:
         raise RceError(USAGE, f"{POOL_VAR} is empty: name at least one Cloud Device in it.")
-    for id, snapshot in pool.items():
-        if not is_raw_id(id):
+    for key, snapshot in pool.items():
+        if not is_raw_id(key):
             raise RceError(
                 USAGE,
-                f"{POOL_VAR} key {id!r} is not an RCE id: a Pool names each Cloud Device "
+                f"{POOL_VAR} key {key!r} is not an RCE id: a Pool names each Cloud Device "
                 "by its RCE id (all digits), not a Device Name.",
             )
         if type(snapshot) is not int:
             raise RceError(
-                USAGE, f"{POOL_VAR} value for {id} is not a Snapshot id (an integer): {snapshot!r}."
+                USAGE, f"{POOL_VAR} value for {key} is not a Snapshot id (an integer): {snapshot!r}."
             )
-    return {int(id): snapshot for id, snapshot in pool.items()}
+    return {int(key): snapshot for key, snapshot in pool.items()}
 
 
 def pool_members(api: CoreAPI, pool: dict[int, int]) -> list[dict]:
