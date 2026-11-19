@@ -31,7 +31,8 @@ Extending it in later tickets:
 - a Pool: `one_run_at_a_time = False` (a subscription), `take_after(method, path, id)`
   for a Cloud Device another job claims mid-call, `free_after(method, path, id, times)`
   for one whose Run another job stops, `delete_snapshot` for a Snapshot gone;
-- inspect traffic: `self.requests` records every request the fake received.
+- inspect traffic: `self.requests` records every request the fake received, once it
+  has acted on it (a start has already fixed its Run's `boot_delay`).
 - a Run address elsewhere: `address_origin` replaces this server in instance_api_url
   (another host, scheme or port, or no scheme).
 
@@ -546,7 +547,11 @@ class FakeRCE:
 
     def handle(self, request: Request) -> Response:
         with self._lock:  # two `rce` processes may call at once
-            return self._handle(request)
+            response = self._handle(request)
+            # Logged once acted on: a test that sees a start and then changes
+            # boot_delay changes only later Runs.
+            self.requests.append(request)
+            return response
 
     def proxy(self, request: Request) -> Response:
         """A request `rce` sent toward another host, with the fake as its proxy."""
@@ -566,7 +571,6 @@ class FakeRCE:
         return response
 
     def _answer(self, request: Request) -> Response:
-        self.requests.append(request)
         self._advance_lifecycle()
         for i, (method, path, response) in enumerate(self._scripted):
             if method == request.method and path == request.path:

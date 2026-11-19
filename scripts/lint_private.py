@@ -5,8 +5,9 @@ Usage: lint_private.py [ROOT]   (default: this repo)
 The terms (ids of the maintainer's own Cloud Devices and Snapshots: not secret, but
 examples use invented ids so readers don't copy real ones) are listed one per line in
 `.private-terms` at the root, a gitignored file: listing them in a tracked file would
-defeat it. Lines starting with `#` are
-comments. Without that file (CI, a fresh clone) the lint passes. Matching is
+defeat it. A worktree has no copy, so without one at the root the lint reads the main
+checkout's (the parent of `git rev-parse --git-common-dir`). Lines starting with `#` are
+comments. With no such file anywhere (CI, a fresh clone) the lint passes. Matching is
 whole-term: `4242` doesn't match `42420` or `142425`.
 """
 
@@ -20,8 +21,18 @@ from pathlib import Path
 TERMS_FILE = ".private-terms"
 
 
+def main_checkout(root: Path) -> Path:
+    common_dir = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return Path(common_dir).parent
+
+
 def read_terms(root: Path) -> list[str]:
     path = root / TERMS_FILE
+    if not path.exists():
+        path = main_checkout(root) / TERMS_FILE
     if not path.exists():
         return []
     lines = (line.strip() for line in path.read_text().splitlines())

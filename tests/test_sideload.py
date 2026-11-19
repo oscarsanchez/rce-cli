@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from conftest import TOKEN
 from fake_rce import GATEWAY_RATE_LIMIT, Response
 
@@ -211,6 +213,41 @@ def test_rce_dev_password_signs_in_without_a_stored_one(rce, fake_rce):
     assert result.returncode == 0, result.stderr
     assert fake_rce.installed_archive == ARCHIVE
     assert_no_secrets(result, fake_rce)
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_rce_dev_password_signs_in_without_its_trailing_newline(rce, fake_rce, ending):
+    running_player(rce, fake_rce)
+    rce.env["RCE_DEV_PASSWORD"] = fake_rce.dev_password + ending  # a `gh secret set` pipe, a file
+    app_zip(rce)
+
+    result = rce.run("sideload", "player", "app.zip")
+
+    assert result.returncode == 0, result.stderr
+    assert fake_rce.installed_archive == ARCHIVE
+
+
+def test_rce_dev_password_keeps_a_trailing_space(rce, fake_rce):
+    fake_rce.dev_password = "dev-PASSWORD-secret "  # one set in the web viewer could end in a space
+    running_player(rce, fake_rce)
+    rce.env["RCE_DEV_PASSWORD"] = fake_rce.dev_password
+    app_zip(rce)
+
+    result = rce.run("sideload", "player", "app.zip")
+
+    assert result.returncode == 0, result.stderr
+    assert fake_rce.installed_archive == ARCHIVE
+
+
+def test_a_stored_dev_password_is_used_as_stored(rce, fake_rce):
+    fake_rce.dev_password = "stored-PASSWORD\n"
+    running_player(rce, fake_rce, "stored-PASSWORD\\n")  # TOML's escape for the newline
+    app_zip(rce)
+
+    result = rce.run("sideload", "player", "app.zip")
+
+    assert result.returncode == 0, result.stderr
+    assert fake_rce.installed_archive == ARCHIVE
 
 
 def test_rce_dev_password_wins_over_a_stored_one(rce, fake_rce):

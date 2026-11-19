@@ -1031,9 +1031,10 @@ def stored_dev_password(name: str | None) -> str | None:
 
 
 def dev_password(ref: DeviceRef) -> str:
-    """The Cloud Device's Dev Password: $RCE_DEV_PASSWORD (for pipelines), else the one
-    stored with its Device Name; exit 4 if neither."""
-    password = os.environ.get(DEV_PASSWORD_VAR) or stored_dev_password(ref.name)
+    """The Cloud Device's Dev Password: $RCE_DEV_PASSWORD (for pipelines) without the
+    trailing newline a secret set from a pipe or file keeps, else the one stored with its
+    Device Name; exit 4 if neither."""
+    password = os.environ.get(DEV_PASSWORD_VAR, "").rstrip("\r\n") or stored_dev_password(ref.name)
     if not password:
         if ref.name:
             remedy = f"Set up dev mode with `rce device setup-dev {ref.name}`, which stores it,"

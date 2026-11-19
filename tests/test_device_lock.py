@@ -57,6 +57,30 @@ def test_the_lock_records_its_owner(rce, fake_rce):
     assert isinstance(lock["pid"], int)
 
 
+class ZeroBootDelayOnSight(list):
+    """The fake's request log, with a test that sets boot_delay to 0 the moment a start shows."""
+
+    def __init__(self, fake_rce):
+        super().__init__()
+        self.fake_rce = fake_rce
+
+    def append(self, request):
+        super().append(request)
+        if (request.method, request.path) == ("POST", START):
+            self.fake_rce.boot_delay = 0
+
+
+def test_a_runs_boot_delay_is_fixed_once_its_start_shows(rce, fake_rce):
+    """What the next test relies on, without its race: the owner's Run keeps the delay."""
+    player(rce, fake_rce)
+    fake_rce.boot_delay = 60
+    fake_rce.requests = ZeroBootDelayOnSight(fake_rce)
+
+    result = rce.run("device", "start", "player", "--timeout", "1")
+
+    assert result.returncode == 5  # it never booted, so the start timed out
+
+
 def test_wait_lock_waits_for_the_owner_then_starts(rce, fake_rce):
     player(rce, fake_rce)
     owner = start_holding_the_lock(rce, fake_rce, "--timeout", "2")
