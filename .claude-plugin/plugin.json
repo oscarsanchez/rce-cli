@@ -1,6 +1,6 @@
 {
   "name": "rce-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Roku® Cloud Emulator from Claude Code: the rce CLI on Claude's PATH, the rce skill, and a Stop hook that warns about Runs still billing. macOS/Linux, needs uv.",
   "author": {
     "name": "Oscar Sanchez"

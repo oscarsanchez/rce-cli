@@ -112,7 +112,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 
 | Command | What it does |
 |---|---|
-| `rce --version` | Print the version, e.g. `rce 0.1.0`. Needs no token, config or network. |
+| `rce --version` | Print the version, e.g. `rce 0.2.0`. Needs no token, config or network. |
 | `rce token set [--json]` | Store the RCE token in rk's file from a hidden prompt or stdin. `--json` prints `{"path": "<rk's file>"}`. |
 | `rce token status [--json]` | The token's owner, organisation, expiry, and trial minutes left. |
 | `rce device list [--running] [--pool] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). `--pool` shows only the Pool's members, in `RCE_POOL` order, each with its Dev Snapshot's state (ready, not ready or missing: RCE deletes a Snapshot unused for 180 days), and "<free> of <members> free", a Free Cloud Device being one with no Run, pending or running. It sends only reads, one device list and one Snapshot read per member. A malformed `RCE_POOL` exits 2, as does a Retired Cloud Device in it; an RCE id RCE doesn't know exits 3. See [`device list --json`](#device-list---json). |
@@ -518,7 +518,7 @@ jobs:
       - name: Install rce
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL -o "$RUNNER_TEMP/bin/rce" https://raw.githubusercontent.com/oscarsanchez/rce-cli/v0.1.0/bin/rce
+          curl -fsSL -o "$RUNNER_TEMP/bin/rce" https://raw.githubusercontent.com/oscarsanchez/rce-cli/v0.2.0/bin/rce
           chmod +x "$RUNNER_TEMP/bin/rce"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Build
@@ -547,7 +547,7 @@ jobs:
           rce device stop "$RCE_DEVICE" --run "$RCE_RUN" --json
 ```
 
-Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Replace `app ready` with a line your app prints when it is ready. Keep `shell: bash`: without it GitHub runs each step with `bash -e`, which has no `pipefail`, so the start step's `| tee` would hide a refused start's exit 4.
+Pin `rce` to a release tag (`v0.2.0` above) and change the tag to upgrade. Replace `app ready` with a line your app prints when it is ready. Keep `shell: bash`: without it GitHub runs each step with `bash -e`, which has no `pipefail`, so the start step's `| tee` would hide a refused start's exit 4.
 
 - **One Cloud Device per pipeline.** The `concurrency` group serialises this pipeline's jobs on its Cloud Device. The device lock can't do it: it only coordinates `rce` processes on one machine, and each job runs on its own runner. Give the pipeline its own Cloud Device and don't use it yourself: a start of yours is refused while the job's Run is on, and the job's start is refused while yours is.
 - **The stop step stops only a Run this job may have started.** It runs once the start step has run (its `outcome` is `success`, `failure` or `cancelled`), even after a failed later step or a cancelled job, since `if: always()` keeps it. It skips when the start step never ran (an earlier step failed, or the job was cancelled first: its `outcome` is `skipped`), and when the start was refused: `rce device start` exits 4 only when RCE refused the start, or the Cloud Device was already running or locked, so that call made no Run; the Run on the Cloud Device, if any, is someone else's. The start step records that (`refused=true`). Any other way the start can fail may have made a Run, so the stop step runs then (see `--run` below for what it stops); a start step that is cancelled or killed records nothing.
@@ -588,7 +588,7 @@ jobs:
       - name: Install rce
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL -o "$RUNNER_TEMP/bin/rce" https://raw.githubusercontent.com/oscarsanchez/rce-cli/v0.1.0/bin/rce
+          curl -fsSL -o "$RUNNER_TEMP/bin/rce" https://raw.githubusercontent.com/oscarsanchez/rce-cli/v0.2.0/bin/rce
           chmod +x "$RUNNER_TEMP/bin/rce"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Build

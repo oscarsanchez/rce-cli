@@ -40,7 +40,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as ws_connect
 
-VERSION = "0.1.0"  # the one source of truth; the plugin manifest repeats it, a test checks
+VERSION = "0.2.0"  # the one source of truth; the plugin manifest repeats it, a test checks
 
 # Exit codes: a public contract, documented in README.md.
 OK, ERROR, USAGE, NOT_FOUND, REFUSED, TIMEOUT = 0, 1, 2, 3, 4, 5
