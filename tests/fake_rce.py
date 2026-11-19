@@ -17,7 +17,7 @@ server, and that address's `input/ready` answers true after a further
 delays default to 0 so tests stay fast; raise one to exercise a wait or a
 timeout. Transitions happen when a request arrives, so the fake needs no
 timers. Like the trial, it runs one Cloud Device at a time (429
-trial_device_run_limit).
+trial_device_run_limit) unless a test sets `one_run_at_a_time` off, as for a Pool.
 
 Extending it in later tickets:
 - add a route: append (METHOD, path regex, handler) to `self.routes`; a handler
@@ -28,6 +28,8 @@ Extending it in later tickets:
 - an accepted start: `start_delay` holds its answer, `start_status` sets it:
   `NO_ANSWER.status` never sends it (closing the connection after `start_delay`),
   a gateway error (502, 503, 504) answers that though the Run was made;
+- a Pool: `one_run_at_a_time = False` (a subscription), `take_after(method, path, id)`
+  for a Cloud Device another job claims mid-call, `delete_snapshot` for a Snapshot gone;
 - inspect traffic: `self.requests` records every request the fake received.
 - a Run address elsewhere: `address_origin` replaces this server in instance_api_url
   (another host, scheme or port, or no scheme).
@@ -61,6 +63,7 @@ console bridge (port 8085) sends each client the lines its BrightScript
 from __future__ import annotations
 
 import base64
+import copy
 import email
 import email.policy
 import hashlib
@@ -362,6 +365,8 @@ class FakeRCE:
         self.requests: list[Request] = []
         self.proxied: list[Request] = []  # what `rce` sent toward any other host (see above)
         self._scripted: list[tuple[str, str, Response]] = []
+        self._takes: list[tuple[str, str, int]] = []  # see take_after
+        self.deleted_snapshots: set[int] = set()  # see delete_snapshot
         self._next_run_id = 9000
         self._next_device_id = 400
         # Lifecycle timing in seconds (see the module docstring).
@@ -374,6 +379,7 @@ class FakeRCE:
         self.start_delay = 0.0  # an accepted start's answer is held this long
         self.start_status = 202  # an accepted start's answer; NO_ANSWER.status: none
         self.run_hidden_reads = 0  # reads after a start that still show no Run; math.inf: never
+        self.one_run_at_a_time = True  # the trial's limit; False: a subscription, many Runs at once
         self._hidden_reads: dict[int, float] = {}  # device id -> reads left that show no Run
         self.snapshot_delay = 0.0  # a new Snapshot is ready this long after it is taken
         self.snapshot_limit = 25  # Snapshots per Cloud Device, like the org's max_snapshots
@@ -459,13 +465,22 @@ class FakeRCE:
             snapshot_out(live, "Live snapshot", live=True),
         ]
         if running:
-            uuid = f"uuid-{id}"
-            device["running_device"] = running_device(self._next_run_id, uuid, self.host)
-            device["running_device"]["instance_api_url"] = self.address(uuid)
-            self._input_ready_at[uuid] = 0.0
-            self._next_run_id += 1
+            self._give_run(device, f"uuid-{id}")
         self.devices[id] = device
         return device
+
+    def _give_run(self, device: dict, uuid: str) -> None:
+        """A running Run on the Cloud Device, as someone else's start leaves it."""
+        device["status"] = "running"
+        device["running_device"] = running_device(self._next_run_id, uuid, self.host)
+        device["running_device"]["instance_api_url"] = self.address(uuid)
+        self._input_ready_at[uuid] = 0.0
+        self._next_run_id += 1
+
+    def take_after(self, method: str, path: str, device_id: int) -> None:
+        """Once the fake has answered the next request to METHOD path, another caller
+        starts a Run on the Cloud Device: a lost race, as two jobs claiming at once see."""
+        self._takes.append((method, path, device_id))
 
     def add_snapshot(self, device_id: int, snapshot_id: int, ready: bool = True) -> dict:
         """Give a Cloud Device another Snapshot, e.g. its Dev Snapshot; `ready=False` while
@@ -474,6 +489,13 @@ class FakeRCE:
         self.snapshots[device_id].append(snapshot)
         self.devices[device_id]["snapshots"].append(snapshot_id)
         return snapshot
+
+    def delete_snapshot(self, device_id: int, snapshot_id: int) -> None:
+        """RCE deletes a Snapshot (as it does one unused for 180 days): reads of it, and a
+        start from it, answer 404. RCE's real answer to that start is unverified."""
+        self.snapshots[device_id] = [s for s in self.snapshots[device_id] if s["id"] != snapshot_id]
+        self.devices[device_id]["snapshots"].remove(snapshot_id)
+        self.deleted_snapshots.add(snapshot_id)
 
     def address(self, uuid: str) -> str:
         """A Run's address, as the Core API gives it in instance_api_url."""
@@ -515,6 +537,15 @@ class FakeRCE:
         return Response(502, "the fake RCE proxies nowhere")
 
     def _handle(self, request: Request) -> Response:
+        response = self._answer(request)
+        for take in [t for t in self._takes if t[:2] == (request.method, request.path)]:
+            self._takes.remove(take)
+            device = copy.deepcopy(self.devices[take[2]])  # the answer may hold the old one
+            self._give_run(device, f"uuid-{device['id']}-taken")
+            self.devices[device["id"]] = device
+        return response
+
+    def _answer(self, request: Request) -> Response:
         self.requests.append(request)
         self._advance_lifecycle()
         for i, (method, path, response) in enumerate(self._scripted):
@@ -607,9 +638,11 @@ class FakeRCE:
             return Response(403, {"detail": ""})
         if device["status"] != "shutdown":
             return ALREADY_RUNNING
-        if any(d["status"] != "shutdown" for d in self.devices.values()):
+        if self.one_run_at_a_time and any(d["status"] != "shutdown" for d in self.devices.values()):
             return TRIAL_RUN_LIMIT
         body = request.json()
+        if body["snapshot_id"] in self.deleted_snapshots:
+            return Response(404, {"detail": "Snapshot not found"})
         uuid = f"uuid-{device['id']}-{self._next_run_id}"
         run = running_device(self._next_run_id, uuid, self.host)
         self._next_run_id += 1
