@@ -720,9 +720,9 @@ def stop_after_failed_start(api: CoreAPI, ref: DeviceRef) -> bool:
 
 
 def start_unanswered(api: CoreAPI, ref: DeviceRef, error: RceError) -> RceError:
-    """A start request that got no answer, which RCE may have accepted all the same. Any
-    Run it has now is this command's (it found none, under the lock), so it is stopped,
-    as it is when rce can't tell."""
+    """A start request that got no answer, or a 503, which RCE may have accepted all the
+    same. Any Run it has now is this command's (it found none, under the lock), so it is
+    stopped, as it is when rce can't tell."""
     try:
         if not has_run(get_device(api, ref)):
             return RceError(error.code, f"{error}. {ref.display} has no Run: the start didn't happen.")
@@ -1780,7 +1780,7 @@ def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
         try:
             api.request("POST", f"/devices/{ref.id}/start", json=body)
         except RceError as error:
-            if error.status is None:  # no answer from RCE
+            if error.status in (None, 503):  # no answer, or 503: RCE may have made a Run
                 raise start_unanswered(api, ref, error)
             raise start_refusal(api, error, ref, body)
         wait = wait_until_ready if options.wait else wait_for_run
