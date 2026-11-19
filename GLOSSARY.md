@@ -36,6 +36,18 @@ _Avoid_: base image, golden snapshot
 The password a Cloud Device's developer mode is protected with, needed to sideload and take screenshots. Set once during dev setup; each Cloud Device has its own.
 _Avoid_: installer password, developer password
 
+**Pool**:
+A set of interchangeable dev-ready Cloud Devices from which a pipeline takes whichever one is free.
+_Avoid_: fleet, farm, device group
+
+**Free Cloud Device**:
+A Cloud Device with no Run, pending or running.
+_Avoid_: idle device, open device, available device
+
+**Claim**:
+Starting a Run on any Free Cloud Device of a Pool. The Run is the claim; stopping it frees the Cloud Device.
+_Avoid_: lease, reserve, allocate
+
 **Retired Cloud Device**:
 A Cloud Device taken out of use. RCE cannot delete it, so it is renamed and dropped from the Device Names.
 _Avoid_: deleted device, removed device
