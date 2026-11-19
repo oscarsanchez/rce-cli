@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""One Run on the agents' Cloud Device for a command, keeping the standing OK's rules.
+
+usage: scripts/live-run OWNER [--max-runtime N] -- command [args...]
+
+The Cloud Device is the Device Name in RCE_AGENT_DEVICE: unset, nothing calls `rce`.
+OWNER becomes RCE_LOCK_OWNER. --max-runtime is 600 s (the default) or less.
+While `rce device list --running` isn't empty it looks again every 60 s, and after
+20 min exits 4 having started nothing. It starts the Cloud Device from its Dev
+Snapshot; a failed start starts nothing more. The command runs with RCE_DEVICE and
+RCE_RUN set; however it ends, the Run is stopped with --run (only while it is still
+that Run) and `rce device list --running` is checked. The record for the ticket
+(Run id, elapsed time, `rce usage` before and after) goes to stderr. Exits with the
+command's status, or the stop's if the command succeeded and the stop failed.
+LIVE_RUN_POLL_S and LIVE_RUN_WAIT_S change the 60 s and 20 min (for tests).
+See docs/agents/live-rce.md.
+"""
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+RCE = str(Path(__file__).resolve().parent.parent / "bin" / "rce")
+MAX_RUNTIME = 600  # seconds: the standing OK's cap on a Run
+POLL_S = float(os.environ.get("LIVE_RUN_POLL_S", 60))
+WAIT_S = float(os.environ.get("LIVE_RUN_WAIT_S", 20 * 60))
+INTERRUPTED = 130
+interrupted = False  # Ctrl-C (or SIGTERM) arrived: run nothing new, but stop the Run
+
+
+def say(message: str) -> None:
+    print(f"live-run: {message}", file=sys.stderr, flush=True)
+
+
+def call(*cmd: str, env: dict | None = None, capture: bool = True) -> tuple[int, str]:
+    """Run `cmd` to its end: its status (128+N if signal N killed it) and stdout if
+    captured. Ctrl-C reaches the child too; wait for it, since `rce` stops what it started."""
+    global interrupted
+    child = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE if capture else None, text=True)
+    while True:
+        try:
+            out, _ = child.communicate()
+            break
+        except KeyboardInterrupt:
+            interrupted = True
+    return (child.returncode if child.returncode >= 0 else 128 - child.returncode), out or ""
+
+
+def running() -> list[dict]:
+    status, out = call(RCE, "device", "list", "--running", "--json")
+    if status:
+        sys.exit(status)
+    return json.loads(out)
+
+
+def names(devices: list[dict]) -> str:
+    return ", ".join(f"{d['device_name'] or d['name']} (Run {d['run']['id']})" for d in devices)
+
+
+def usage() -> str:
+    status, out = call(RCE, "usage")
+    return out.strip() if status == 0 else f"`rce usage` failed (exit {status})"
+
+
+def wait_turn() -> None:
+    deadline = time.monotonic() + WAIT_S
+    while busy := running():
+        if time.monotonic() >= deadline:
+            say(f"still running after {WAIT_S / 60:g} min: {names(busy)}. Started nothing.")
+            sys.exit(4)
+        say(f"waiting: {names(busy)}. Looking again in {POLL_S:g} s.")
+        time.sleep(POLL_S)
+
+
+def stop(device: str, run: int, env: dict) -> int:
+    """Stop the Run if it is still `run`; then check nothing runs. 0, or the stop's failure."""
+    status, out = call(RCE, "device", "stop", device, "--run", str(run), "--wait", "--wait-lock", env=env)
+    if out:
+        say(out.strip())
+    failed = status not in (0, 4)  # 4: the Run already ended, nothing stopped
+    if failed:
+        say(f"the stop failed: Run {run} may still bill. Stop it: rce device stop {device} --run {run}")
+    if left := running():
+        say(f"still running: {names(left)}")
+    return status if failed else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="scripts/live-run", usage=__doc__.splitlines()[2][7:])
+    parser.add_argument("owner")
+    parser.add_argument("--max-runtime", type=int, default=MAX_RUNTIME)
+    parser.add_argument("command", nargs="+")
+    args = parser.parse_args()
+    if not 0 < args.max_runtime <= MAX_RUNTIME:
+        parser.error(f"--max-runtime takes 1 to {MAX_RUNTIME} seconds, not {args.max_runtime}.")
+    device = os.environ.get("RCE_AGENT_DEVICE")
+    if not device:
+        say("RCE_AGENT_DEVICE names no Cloud Device: start nothing, and ask.")
+        return 2
+
+    env = {**os.environ, "RCE_LOCK_OWNER": args.owner}
+    wait_turn()
+    before = usage()
+    status, out = call(
+        RCE, "device", "start", device, "--max-runtime", str(args.max_runtime), "--json", env=env
+    )
+    if status:
+        say(f"the start failed (exit {status}): starting nothing more.")
+        return status
+    run = json.loads(out)["run"]["id"]
+    started = time.monotonic()
+    code = INTERRUPTED
+    try:
+        say(f"Run {run} on {device} started, capped at {args.max_runtime} s.")
+        if not interrupted:
+            code, _ = call(
+                *args.command, env={**env, "RCE_DEVICE": device, "RCE_RUN": str(run)}, capture=False
+            )
+    except OSError as error:  # the command doesn't exist or can't run
+        say(f"cannot run {args.command[0]}: {error.strerror}")
+        code = 127
+    finally:
+        stop_status = stop(device, run, env)
+    say(f"record: Run {run} on {device}, {time.monotonic() - started:.0f} s from start to stop.")
+    say(f"usage before: {before}")
+    say(f"usage after: {usage()}")
+    return code or stop_status
+
+
+def on_sigterm(signum, frame):
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, on_sigterm)
+try:
+    sys.exit(main())
+except KeyboardInterrupt:  # before any Run, or after the stop: nothing to stop
+    sys.exit(INTERRUPTED)

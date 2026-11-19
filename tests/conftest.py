@@ -35,7 +35,10 @@ _UV_ENV = {
     var: subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
     for var, cmd in _UV_DIRS.items()
 }
-_DROPPED = {"RCE_TOKEN", "RK_RCE_TOKEN", "ROKU_RCE_CONFIG_PATH", "VIRTUAL_ENV", "CLAUDE_PLUGIN_ROOT"}
+_DROPPED = {
+    "RCE_TOKEN", "RK_RCE_TOKEN", "RCE_AGENT_DEVICE", "ROKU_RCE_CONFIG_PATH", "VIRTUAL_ENV",
+    "CLAUDE_PLUGIN_ROOT",
+}
 
 
 @pytest.fixture(autouse=True)
