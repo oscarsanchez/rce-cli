@@ -246,7 +246,8 @@ def test_the_stop_step_runs_once_the_start_step_ran_unless_it_was_refused(tmp_pa
 
 def test_the_secret_line_hands_gh_the_dev_password_with_no_trailing_newline(tmp_path):
     """`rce` ends the Dev Password with a newline and `gh secret set` keeps its stdin whole,
-    so a secret piped straight from stderr signs in with "password\\n" and gets a 401."""
+    so a secret piped straight from stderr holds "password\\n": `rce` v0.2.0 signs in with it
+    and gets a 401. The line works with every version."""
     [line] = [line for line in pipeline_section().splitlines() if "gh secret set RCE_DEV_PASSWORD" in line]
     bin_ = tmp_path / "bin"
     bin_.mkdir()
