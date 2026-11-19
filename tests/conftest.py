@@ -63,6 +63,14 @@ class Rce:
             RCE_API_URL=fake.api_url,
         )
 
+    def proxy_through(self, fake: FakeRCE) -> None:
+        """Send whatever `rce` sends toward any host but the fake's own to the fake, as
+        its HTTP(S) proxy, so a test sees it in `fake.proxied` and nothing leaves."""
+        proxy = f"http://{fake.host}"
+        for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            self.env[name] = proxy
+        self.env["no_proxy"] = self.env["NO_PROXY"] = "127.0.0.1"
+
     @property
     def rk_config(self) -> Path:
         return self.home / "roku-rce-config.json"

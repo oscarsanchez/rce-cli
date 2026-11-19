@@ -99,15 +99,6 @@ def test_start_waits_until_running_and_input_ready_at_the_runs_own_address(rce, 
     assert ready and all(r.headers["authorization"] == f"Bearer {TOKEN}" for r in ready)
 
 
-def test_a_run_address_without_a_scheme_takes_the_core_apis(rce, fake_rce):
-    player(rce, fake_rce)
-    fake_rce.address_scheme = ""  # as RCE's spec documents instance_api_url
-
-    run = rce.json("device", "start", "player")
-
-    assert run["status"] == "running"
-
-
 def test_start_reports_the_hourly_cost_and_auto_stop_time(rce, fake_rce):
     player(rce, fake_rce)
 

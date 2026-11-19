@@ -46,6 +46,7 @@ OK, ERROR, USAGE, NOT_FOUND, REFUSED, TIMEOUT = 0, 1, 2, 3, 4, 5
 INTERRUPTED = 130  # Ctrl-C, as shells report SIGINT
 
 DEFAULT_API_URL = "https://api.rce.roku.com/api/v1"
+RCE_DOMAIN = "rce.roku.com"  # the token goes here over https at the default port, as rk sends it
 
 
 class RceError(Exception):
@@ -288,6 +289,17 @@ def error_message(response: httpx.Response) -> str:
     return str(detail or "")
 
 
+def origin(url: str) -> tuple[str, str, int | None]:
+    """A URL's (scheme, host, port), a WebSocket's as its HTTP twin's, the port spelled out."""
+    parts = urlsplit(url)
+    scheme = {"ws": "http", "wss": "https"}.get(parts.scheme, parts.scheme)
+    try:
+        port = parts.port or {"http": 80, "https": 443}.get(scheme)
+    except ValueError:  # not a port at all
+        port = None
+    return scheme, parts.hostname or "", port
+
+
 def exit_code_for(status: int, message: str) -> int:
     if status == 404 or (status == 403 and not message):  # empty 403: not found or not yours
         return NOT_FOUND
@@ -331,12 +343,30 @@ class CoreAPI:
     def send_once(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Send once, never retried: for a device's own traffic, whose answer could
         carry the gateway's rate-limit markers. Any status comes back."""
+        self.check_reach(url)
         try:
             return self.http.request(method, url, **kwargs)
         except httpx.TimeoutException:
             raise RceError(TIMEOUT, f"RCE at {url} did not answer in time")
         except httpx.HTTPError as error:
             raise RceError(ERROR, f"cannot reach RCE at {url}: {type(error).__name__}")
+
+    def check_reach(self, url: str) -> None:
+        """Exit 1, before anything is sent, unless the token may go to `url`: https (or
+        wss) on rce.roku.com or a subdomain at the default port, or the Core API's own
+        origin (RCE_API_URL, which tests point at the fake RCE)."""
+        scheme, host, port = origin(url)
+        on_rce = host == RCE_DOMAIN or host.endswith(f".{RCE_DOMAIN}")
+        if ((scheme, port) == ("https", 443) and on_rce) or (scheme, host, port) == origin(self.base):
+            return
+        where = urlsplit(url)
+        raise RceError(
+            ERROR,
+            f"refusing to send the RCE token to {where.netloc.rpartition('@')[2]} over "
+            f"{where.scheme}: rce sends it only over https to {RCE_DOMAIN} "
+            "and its subdomains at the default port, or to RCE_API_URL's own origin. "
+            "The Core API gave this address; check RCE_API_URL.",
+        )
 
     def error(self, response: httpx.Response) -> RceError:
         """RCE's error answer as an RceError with the matching exit code."""
@@ -486,16 +516,16 @@ def has_run(device: dict) -> bool:
     return device["status"] != "shutdown"
 
 
-def run_address(api: CoreAPI, device: dict) -> str | None:
+def run_address(device: dict) -> str | None:
     """The Run's Instance API base URL, from the Core API's answer (None until running).
 
-    Live RCE gives it with https://; its spec says without, so a bare one takes
-    the Core API's scheme. WebSocket routes swap http for ws.
+    Live RCE gives it with https://; its spec says without, so a bare one is read
+    as https. WebSocket routes swap http for ws.
     """
     url = (device.get("running_device") or {}).get("instance_api_url")
     if not url:
         return None
-    return url.rstrip("/") if "://" in url else f"{urlsplit(api.base).scheme}://{url}"
+    return url.rstrip("/") if "://" in url else f"https://{url}"
 
 
 def require_run(device: dict, ref: DeviceRef) -> dict:
@@ -516,7 +546,7 @@ def current_run(api: CoreAPI, ref: DeviceRef) -> Run:
     """
     device = get_device(api, ref)
     require_run(device, ref)
-    address = run_address(api, device)
+    address = run_address(device)
     if device["status"] != "running" or address is None:
         raise RceError(
             REFUSED,
@@ -548,7 +578,7 @@ def wait_until_ready(api: CoreAPI, ref: DeviceRef, timeout: float) -> dict:
 
     def ready() -> dict | None:  # no Run yet is "not ready": RCE may lag its own 202
         device = get_device(api, ref)
-        address = run_address(api, device)
+        address = run_address(device)
         if device["status"] != "running" or not address:
             return None
         try:
@@ -761,7 +791,7 @@ def send_keys(api: CoreAPI, ref: DeviceRef, keys: list[str], delay: float = 0) -
     is set up. `delay` is seconds between keys. Exits 4 if it isn't running.
     """
     current_run(api, ref)
-    address = run_address(api, wait_until_ready(api, ref, INPUT_READY_TIMEOUT))
+    address = run_address(wait_until_ready(api, ref, INPUT_READY_TIMEOUT))
     for i, key in enumerate(keys):
         if i and delay:
             time.sleep(delay)
@@ -1405,6 +1435,7 @@ def open_bridge(api: CoreAPI, run: Run, port: int, what: str) -> ClientConnectio
     port, which for the console and debug ports means dev mode is off (exit 4).
     """
     url = "ws" + run.address.removeprefix("http") + f"/api/v0/ports/{port}"
+    api.check_reach(url)
     try:
         return ws_connect(
             url,
