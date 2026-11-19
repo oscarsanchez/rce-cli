@@ -9,6 +9,8 @@ Specs and tickets for this repo live as markdown files in `.scratch/`, on the ma
 - Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never a single combined tickets file
 - Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
+- Other working files (release notes, research) sit beside the feature's `spec.md`, never in `issues/`
+- An agent in a git worktree can't write `.scratch/`: it returns its tracker writes (comments, notes) in its report, and the orchestrator writes them to `.scratch/` in the main checkout
 
 ## When a skill says "publish to the issue tracker"
 
