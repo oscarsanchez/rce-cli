@@ -7,6 +7,7 @@ import time
 import pytest
 from fake_rce import (
     ALREADY_RUNNING,
+    NO_ANSWER,
     OVER_CAP,
     SNAPSHOT_NOT_READY,
     TRIAL_EXHAUSTED,
@@ -168,18 +169,53 @@ def test_a_member_whose_device_lock_another_rce_holds_is_skipped(rce, fake_rce):
     assert not fake_rce.requests_to("GET", "/api/v1/devices/375")
 
 
-def test_a_start_answered_503_skips_the_member_with_a_warning_and_stops_nothing(rce, fake_rce):
+def looked_after_its_start(fake_rce, id: int) -> bool:
+    """Whether rce read the Cloud Device after sending it a start."""
+    paths = [(r.method, r.path) for r in fake_rce.requests]
+    sent = paths.index(("POST", start_path(id)))
+    return ("GET", f"/api/v1/devices/{id}") in paths[sent:]
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+@pytest.mark.parametrize("run_made", [False, True])
+def test_a_start_answered_a_gateway_error_skips_the_member_with_a_warning_and_stops_nothing(
+    rce, fake_rce, status, run_made
+):
+    """A Run found on the member may be another job's Claim, so rce neither looks nor stops."""
     pool(rce, fake_rce, {375: 2001, 376: 2002})
-    for id in (375, 376):
-        fake_rce.fail_next("POST", start_path(id), Response(503, {"detail": "Service Unavailable"}))
+    if run_made:
+        fake_rce.start_status = status
+    else:
+        for id in (375, 376):
+            fake_rce.fail_next("POST", start_path(id), Response(status, {"detail": "Bad Gateway"}))
 
     result = rce.run("device", "start", "--pool")
 
     assert_all_skipped(result, fake_rce, {375, 376}, 2)
     for id in (375, 376):
-        assert f"Cloud Device {id}: RCE answered its start with 503" in result.stderr
+        assert f"Cloud Device {id}: RCE answered its start with {status}; skipped" in result.stderr
+        assert not looked_after_its_start(fake_rce, id)
     assert "may have made a Run" in result.stderr
-    assert "the start didn't happen" not in result.stderr  # no look for a Run that may be another's
+
+
+@pytest.mark.parametrize("run_made", [False, True])
+def test_a_start_with_no_answer_skips_the_member_with_a_warning_and_stops_nothing(
+    rce, fake_rce, run_made
+):
+    pool(rce, fake_rce, {375: 2001, 376: 2002})
+    if run_made:
+        fake_rce.start_status = NO_ANSWER.status
+    else:
+        for id in (375, 376):
+            fake_rce.fail_next("POST", start_path(id), NO_ANSWER)
+
+    result = rce.run("device", "start", "--pool")
+
+    assert_all_skipped(result, fake_rce, {375, 376}, 2)
+    for id in (375, 376):
+        assert f"Cloud Device {id}: RCE gave its start no answer" in result.stderr
+        assert not looked_after_its_start(fake_rce, id)
+    assert "may have made a Run" in result.stderr
 
 
 def test_a_member_whose_dev_snapshot_rce_deleted_is_skipped_with_a_warning(rce, fake_rce):
@@ -258,6 +294,23 @@ def test_a_claim_whose_wait_fails_stops_that_run_once_and_tries_no_other(
     assert start.returncode == code, stderr
     assert stops(fake_rce) == [f"/api/v1/devices/{claimed}/stop"]
     assert starts(fake_rce).keys() == {claimed}
+
+
+def test_ctrl_c_during_a_start_request_stops_nothing_and_warns_it_may_bill(rce, fake_rce):
+    """RCE took the start and holds its answer: a Run on that member may be another job's
+    Claim, so rce neither looks nor stops."""
+    pool(rce, fake_rce, {375: 2001})
+    fake_rce.start_delay = 30
+    tty = rce.interactive("device", "start", "--pool")
+    wait_for_request(fake_rce, "POST", start_path(375))
+    tty.interrupt()
+    result = tty.finish()
+
+    assert result.returncode == 130
+    assert not stops(fake_rce)
+    assert not looked_after_its_start(fake_rce, 375)
+    assert "Cloud Device 375: interrupted before RCE answered its start" in result.stderr
+    assert "may have made a Run, which bills until its --max-runtime" in result.stderr
 
 
 def test_ctrl_c_after_the_claim_stops_its_run(rce, fake_rce):

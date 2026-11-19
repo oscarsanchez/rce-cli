@@ -825,10 +825,13 @@ class CommandRun:
 
     def __init__(self, api: CoreAPI, ref: DeviceRef, adopt: bool, shared: bool = False):
         self.api, self.ref, self.adopt = api, ref, adopt
-        # A Pool member: other callers start it too, so a Run found after a 503 to the
-        # start may be theirs. The 503 is passed on, with no look and no stop.
+        # A Pool member: other callers start it too, so a Run found after a start RCE
+        # may have taken may be theirs. Its error is passed on, with no look and no stop.
         self.shared = shared
         self.device: dict | None = None  # the Cloud Device as RCE last gave it
+        # The start was sent and RCE's answer didn't say whether it took it: none yet,
+        # none at all, or a gateway error.
+        self.start_unknown = False
         self.started = False  # RCE accepted this command's start
         self.adopted = False  # the Run was already going, and this command uses it
         self.stop_tried = False  # a stop was asked for, whether or not it worked
@@ -860,14 +863,17 @@ class CommandRun:
             "max_runtime": options.max_runtime,
         }
         try:
+            self.start_unknown = True
             try:
                 api.request("POST", f"/devices/{ref.id}/start", json=body)
             except RceError as error:
-                if self.shared and error.status == 503:
+                if error.status not in (None, *GATEWAY_ERRORS):
+                    self.start_unknown = False
+                    raise start_refusal(api, error, ref, body)
+                if self.shared:  # RCE may have made a Run
                     raise
-                if error.status in (None, *GATEWAY_ERRORS):  # RCE may have made a Run
-                    raise start_uncertain(api, ref, error)
-                raise start_refusal(api, error, ref, body)
+                raise start_uncertain(api, ref, error)
+            self.start_unknown = False
             self.started = True
             wait = wait_until_ready if options.wait else wait_for_run
             try:
@@ -879,7 +885,8 @@ class CommandRun:
                     raise RceError(ERROR, str(error), error.rce_code, error.status) from error
                 raise
         except KeyboardInterrupt:  # from the start request on: RCE may have accepted the start.
-            self._stop_after_failure()  # Stop first: a check could race RCE accepting it.
+            if self.started or not self.shared:
+                self._stop_after_failure()  # Stop first: a check could race RCE accepting it.
             raise
 
     def stop(self, wait: bool = False) -> dict:
@@ -1378,7 +1385,17 @@ def claim_free(
             with command_run(api, ref, keep=True, adopt=False, wait_lock=False, shared=True) as run:
                 run.start(replace(options, snapshot=pool[ref.id]))
             return ref, run.device
+        except KeyboardInterrupt:
+            if run and run.start_unknown:
+                warn(
+                    f"{ref.display}: interrupted before RCE answered its start; rce stopped "
+                    "nothing. RCE may have made a Run, which bills until its --max-runtime."
+                )
+            raise
         except RceError as error:
+            if run and run.start_unknown:
+                warn(unknown_start_skip(ref, error))
+                continue
             skip = None if run and run.started else pool_skip(error, ref, pool[ref.id])
             if skip is None:  # after the Claim, or a refusal every member would get
                 raise
@@ -1394,14 +1411,19 @@ def pool_skip(error: RceError, ref: DeviceRef, snapshot_id: int) -> str | None:
         return ""  # RCE's 409 "already running or locked"
     if error.rce_code == "snapshot_not_ready":
         return f"{ref.display}: its Dev Snapshot {snapshot_id} is not ready (RCE is saving it); skipped."
-    if error.status == 503:
-        return (
-            f"{ref.display}: RCE answered its start with 503; skipped. RCE may have made a Run "
-            "anyway, which bills until its --max-runtime and keeps this member busy."
-        )
     if error.status == 404:  # RCE's answer for a deleted Snapshot is unverified
         return f"{missing_dev_snapshot(ref, snapshot_id)} Skipped."
     return None
+
+
+def unknown_start_skip(ref: DeviceRef, error: RceError) -> str:
+    """The warning for a Pool member whose start RCE may have taken: no answer, or a gateway
+    error. rce neither looks nor stops: a Run found there may be another job's Claim."""
+    answer = f"answered its start with {error.status}" if error.status else f"gave its start no answer ({error})"
+    return (
+        f"{ref.display}: RCE {answer}; skipped. RCE may have made a Run anyway, which bills "
+        "until its --max-runtime and keeps this member busy."
+    )
 
 
 def dev_snapshot_status(api: CoreAPI, device_id: int, snapshot_id: int) -> str:
