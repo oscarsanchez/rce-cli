@@ -508,8 +508,9 @@ class FakeRCE:
         return snapshot
 
     def delete_snapshot(self, device_id: int, snapshot_id: int) -> None:
-        """RCE deletes a Snapshot (as it does one unused for 180 days): reads of it, and a
-        start from it, answer 404. RCE's real answer to that start is unverified."""
+        """RCE deletes a Snapshot (as it does one unused for 180 days): reads of it answer
+        404, and a start from it answers 403 with an empty detail, as live RCE answered a
+        start from a Snapshot it doesn't have (Run-less check, 2026-11-19)."""
         self.snapshots[device_id] = [s for s in self.snapshots[device_id] if s["id"] != snapshot_id]
         self.devices[device_id]["snapshots"].remove(snapshot_id)
         self.deleted_snapshots.add(snapshot_id)
@@ -661,7 +662,7 @@ class FakeRCE:
             return TRIAL_RUN_LIMIT
         body = request.json()
         if body["snapshot_id"] in self.deleted_snapshots:
-            return Response(404, {"detail": "Snapshot not found"})
+            return Response(403, {"detail": ""})  # live: a start from a Snapshot RCE doesn't have
         uuid = f"uuid-{device['id']}-{self._next_run_id}"
         run = running_device(self._next_run_id, uuid, self.host)
         self._next_run_id += 1

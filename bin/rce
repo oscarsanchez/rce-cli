@@ -1440,7 +1440,7 @@ def skip_warning(
         )
     if error.rce_code == "snapshot_not_ready":
         return f"{ref.display}: its Dev Snapshot {snapshot_id} is not ready (RCE is saving it); skipped."
-    if error.status == 404:  # RCE's answer for a deleted Snapshot is unverified
+    if error.code == NOT_FOUND:  # live, a start from a Snapshot RCE doesn't have: empty 403
         return f"{missing_dev_snapshot(ref, snapshot_id)} Skipped."
     return None
 
