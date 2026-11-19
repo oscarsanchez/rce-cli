@@ -138,3 +138,57 @@ def test_status_of_a_starting_device(rce, fake_rce):
 
     assert status["status"] == "pending"
     assert status["elapsed_s"] is not None
+
+
+def test_stop_with_the_current_runs_id_stops_it(rce, fake_rce):
+    running_player(rce, fake_rce, minutes_ago=30)
+
+    stopped = rce.json("device", "stop", "player", "--run", "9000")
+
+    assert stopped["run"]["id"] == 9000
+    assert 1800 <= stopped["elapsed_s"] < 1830
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
+
+
+def test_stop_with_another_runs_id_stops_nothing(rce, fake_rce):
+    """Job A's Run ended at its cap and job B started Run 9000: A's stop leaves it alone."""
+    running_player(rce, fake_rce)
+
+    result = rce.run("device", "stop", "player", "--run", "8999")
+
+    assert result.returncode == 4
+    assert "Run 8999 already ended; nothing stopped" in result.stderr
+    assert not fake_rce.requests_to("POST", STOP)
+    assert fake_rce.devices[351]["status"] == "running"
+
+
+def test_stop_with_a_run_id_when_no_run_is_on_the_device_stops_nothing(rce, fake_rce):
+    fake_rce.add_device(351, "Personal RCE Player", "stb")
+    rce.name_device("351", "player")
+
+    result = rce.run("device", "stop", "player", "--run", "9000")
+
+    assert result.returncode == 4
+    assert "Run 9000 already ended; nothing stopped" in result.stderr
+    assert not fake_rce.requests_to("POST", STOP)
+
+
+def test_stop_with_a_run_id_that_is_not_a_number_is_a_usage_error(rce, fake_rce):
+    running_player(rce, fake_rce)
+
+    result = rce.run("device", "stop", "player", "--run", "abc")
+
+    assert result.returncode == 2
+    assert not fake_rce.requests_to("POST", STOP)
+
+
+def test_stop_with_the_current_runs_id_waits_and_reports_as_a_plain_stop(rce, fake_rce):
+    running_player(rce, fake_rce, minutes_ago=30)
+    fake_rce.stop_delay = 0.5
+
+    result = rce.run("device", "stop", "player", "--run", "9000", "--wait")
+
+    assert result.returncode == 0, result.stderr
+    assert "Stopped player (351): Run 9000 ran 30 min" in result.stdout
+    assert "It is shut down." in result.stdout
+    assert fake_rce.devices[351]["status"] == "shutdown"

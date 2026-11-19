@@ -121,3 +121,18 @@ def test_the_lock_is_per_cloud_device(rce, fake_rce):
     owner.wait(timeout=30)
 
     assert "locked" not in result.stderr
+
+
+def test_stop_of_a_run_reads_the_device_only_once_it_holds_the_lock(rce, fake_rce):
+    """The owner's Run 9000 ends while `stop --run 9000 --wait-lock` waits, so it stops nothing."""
+    player(rce, fake_rce)
+    owner = start_holding_the_lock(rce, fake_rce, "--timeout", "2")
+    fake_rce.stop_delay = 0  # the owner's stop ends its Run at once
+
+    result = rce.run("device", "stop", "player", "--run", "9000", "--wait-lock")
+    owner.wait(timeout=30)
+
+    assert owner.returncode == 5  # the owner timed out and stopped its Run
+    assert result.returncode == 4
+    assert "Run 9000 already ended; nothing stopped" in result.stderr
+    assert len(fake_rce.requests_to("POST", STOP)) == 1  # only the owner's own stop

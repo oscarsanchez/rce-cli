@@ -123,7 +123,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce device retire <device> [--yes] [--json]` | Retire a Cloud Device: rename it on RCE with a `retired/` prefix and drop its Device Name. It asks first unless `--yes` (no terminal means no, exit 2). Refuses a Cloud Device with a Run, pending or running (exit 4): stop it first. One already retired (its RCE name starts with `retired/`) exits 2 and is left as it is. |
 | `rce device delete` | Not possible: RCE can't delete Cloud Devices. Exits 2 and points to `retire`. |
 | `rce device start <device> [--snapshot ID] [--firmware ID] [--max-runtime S] [--no-wait] [--timeout S] [--wait-lock] [--json]` | Start a Run and wait until it takes input. See [Runs](#runs). |
-| `rce device stop <device> [--wait] [--timeout S] [--wait-lock] [--json]` | End the Run and say what it cost. `--wait` waits until the Cloud Device has shut down (default timeout 120 s). Exits 4 if it isn't running. |
+| `rce device stop <device> [--run ID] [--wait] [--timeout S] [--wait-lock] [--json]` | End the Run and say what it cost. `--run` stops it only while Run `ID` is the current one: with another Run or none it exits 4, "Run ID already ended; nothing stopped", and sends no stop. `--wait` waits until the Cloud Device has shut down (default timeout 120 s). Exits 4 if it isn't running. |
 | `rce device status <device> [--json]` | The Cloud Device's state and, during a Run, its start time, cap, auto-stop time, elapsed time and elapsed cost. |
 | `rce usage [--json]` | Trial minutes used and left, or, once subscribed, the minutes billed this month. |
 | `rce key <device> <key>… [--delay MS] [--json]` | Press remote keys in order on a running Cloud Device. See [Using a running Cloud Device](#using-a-running-cloud-device). |
@@ -508,8 +508,9 @@ jobs:
         id: start
         run: |
           status=0
-          rce device start "$RCE_DEVICE" --snapshot "$RCE_SNAPSHOT" --max-runtime 1500 --json || status=$?
+          rce device start "$RCE_DEVICE" --snapshot "$RCE_SNAPSHOT" --max-runtime 1500 --json | tee start.json || status=$?
           if [ "$status" -eq 4 ]; then echo "refused=true" >> "$GITHUB_OUTPUT"; fi   # no Run of ours to stop
+          if [ "$status" -eq 0 ]; then echo "run=$(jq .run.id start.json)" >> "$GITHUB_OUTPUT"; fi   # the Run to stop
           exit "$status"
       - name: Sideload and wait for the app
         run: |
@@ -520,13 +521,18 @@ jobs:
           wait "$console"
       - name: Stop the Run
         if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.start.outcome) && steps.start.outputs.refused != 'true'
-        run: rce device stop "$RCE_DEVICE" --json
+        env:
+          RCE_RUN: ${{ steps.start.outputs.run }}
+        run: |
+          if [ -z "$RCE_RUN" ]; then exit 0; fi   # the start failed and dealt with any Run it made
+          rce device stop "$RCE_DEVICE" --run "$RCE_RUN" --json
 ```
 
 Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Replace `app ready` with a line your app prints when it is ready.
 
-- **One Cloud Device per pipeline.** The `concurrency` group serialises this pipeline's jobs on its Cloud Device. The device lock can't do it: it only coordinates `rce` processes on one machine, and each job runs on its own runner. Give the pipeline its own Cloud Device and don't use it yourself: the stop step stops whatever Run is on that Cloud Device.
-- **The stop step stops only a Run this job may have started.** It runs once the start step has run (its `outcome` is `success`, `failure` or `cancelled`), even after a failed later step or a cancelled job, since `if: always()` keeps it. It skips when the start step never ran (an earlier step failed, or the job was cancelled first: its `outcome` is `skipped`), and when the start was refused: `rce device start` exits 4 only when RCE refused the start, or the Cloud Device was already running or locked, so that call made no Run; the Run on the Cloud Device, if any, is someone else's. The start step records that (`refused=true`). Any other way the start can fail may have made a Run, so the stop runs then; a start step that is cancelled or killed records nothing.
+- **One Cloud Device per pipeline.** The `concurrency` group serialises this pipeline's jobs on its Cloud Device. The device lock can't do it: it only coordinates `rce` processes on one machine, and each job runs on its own runner. Give the pipeline its own Cloud Device and don't use it yourself: a start of yours is refused while the job's Run is on, and the job's start is refused while yours is.
+- **The stop step stops only a Run this job may have started.** It runs once the start step has run (its `outcome` is `success`, `failure` or `cancelled`), even after a failed later step or a cancelled job, since `if: always()` keeps it. It skips when the start step never ran (an earlier step failed, or the job was cancelled first: its `outcome` is `skipped`), and when the start was refused: `rce device start` exits 4 only when RCE refused the start, or the Cloud Device was already running or locked, so that call made no Run; the Run on the Cloud Device, if any, is someone else's. The start step records that (`refused=true`). Any other way the start can fail may have made a Run, so the stop step runs then (see `--run` below for what it stops); a start step that is cancelled or killed records nothing.
+- **`--run` keeps the stop to this job's Run.** The start step records the started Run's id (`run`), and the stop step passes it with `--run`: if the Cloud Device's current Run has another id, or there is none, `rce device stop --run` exits 4 with "Run <id> already ended; nothing stopped" and sends no stop. So when this job's Run reaches its cap and someone else then starts one, this job doesn't stop theirs. A start that fails after RCE accepted it records no id: `rce device start` has already stopped the Run it made, or said how to stop it, so the stop step does nothing. `--run` leaves a small race: `rce` reads the Cloud Device, then stops it, and RCE's stop takes no Run id, so a start by someone else between the two is stopped.
 - **Only the newest waiting job runs.** GitHub keeps at most one running and one pending job per `concurrency` group: a newer push cancels the older pending job, while the running job finishes. Adding `cancel-in-progress: true` to the group also cancels the running job; its stop step still runs once its start step has run, since `if: always()` covers a cancelled job.
 - **One Run at a time.** The trial allows one Run at a time across the organisation, so while a job's Run is going any other start, from another pipeline or from you at a terminal, is refused (exit 4).
 - **A killed job bills until the cap.** If the runner dies before the stop step runs, the Run bills until its cap: 60 minutes by default, or `--max-runtime` (25 minutes above, a little over the job's `timeout-minutes`). `rce device list --running` shows a Run left on.
@@ -539,7 +545,7 @@ Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Repla
 | 1 | Other error: RCE unreachable or a server error (5xx); also a `device start` refused after RCE accepted it (a rejected token or rate limit while waiting for the Run), since that call made a Run |
 | 2 | Usage: bad arguments (including a port `forward` can't bridge, or a local port in use), no token configured, an unreadable per-user config, a Device Name already in use, a confirmation declined (or impossible without a terminal), or retiring a Cloud Device that is already retired |
 | 3 | Not found: device, Device Name or Snapshot (RCE's 404, or a 403 with no message, which means "not yours"); an ECP command or app the device doesn't have |
-| 4 | Refused: rejected token (401), trial limit or trial used up, already running, not running, Cloud Device locked by another `rce`, quota, Snapshot limit, Snapshot not ready, rate limit that persists, and other 4xx; also retiring a Cloud Device that has a Run, a console that is unavailable (dev mode off), ECP refused by "Control by mobile apps" (403), a key the device didn't take, a Run that ends under `console` or `forward`, a wrong or missing Dev Password, a failed install, a screenshot with no dev app in the foreground, a `setup-dev` with no terminal to ask at (before it starts anything, or at a step that needs a person), and a `setup-dev` that fails its verification |
+| 4 | Refused: rejected token (401), trial limit or trial used up, already running, not running, Cloud Device locked by another `rce`, quota, Snapshot limit, Snapshot not ready, rate limit that persists, and other 4xx; also retiring a Cloud Device that has a Run, a console that is unavailable (dev mode off), ECP refused by "Control by mobile apps" (403), a key the device didn't take, a Run that ends under `console` or `forward`, a `device stop --run` whose Run already ended, a wrong or missing Dev Password, a failed install, a screenshot with no dev app in the foreground, a `setup-dev` with no terminal to ask at (before it starts anything, or at a step that needs a person), and a `setup-dev` that fails its verification |
 | 5 | Timeout: RCE didn't answer, a Run or Snapshot wasn't ready (or a Run shut down) in time, or `console --until` saw no match in time |
 | 130 | Interrupted (Ctrl-C). A Run that `device start` asked for or was waiting on, or that `device setup-dev` started, is stopped first. |
 
