@@ -40,6 +40,10 @@ _Avoid_: installer password, developer password
 A set of interchangeable dev-ready Cloud Devices from which a pipeline takes whichever one is free.
 _Avoid_: fleet, farm, device group
 
+**Pool member**:
+A Cloud Device listed in a Pool. It is a Free Cloud Device whenever it has no Run.
+_Avoid_: slot, worker
+
 **Free Cloud Device**:
 A Cloud Device with no Run, pending or running.
 _Avoid_: idle device, open device, available device

@@ -2,9 +2,10 @@
 
 Usage: lint_private.py [ROOT]   (default: this repo)
 
-The terms (ids of the maintainer's own Cloud Devices and Snapshots that must stay
-unpublished) are listed one per line in `.private-terms` at the root, a gitignored
-file: naming them in a tracked file would publish them. Lines starting with `#` are
+The terms (ids of the maintainer's own Cloud Devices and Snapshots: not secret, but
+examples use invented ids so readers don't copy real ones) are listed one per line in
+`.private-terms` at the root, a gitignored file: listing them in a tracked file would
+defeat it. Lines starting with `#` are
 comments. Without that file (CI, a fresh clone) the lint passes. Matching is
 whole-term: `4242` doesn't match `42420` or `142425`.
 """
