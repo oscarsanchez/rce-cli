@@ -25,6 +25,13 @@ Extending it in later tickets:
 - an accepted start: `start_delay` holds its answer, `start_dropped` never sends it
   (closing the connection after `start_delay`);
 - inspect traffic: `self.requests` records every request the fake received.
+- a Run address elsewhere: `address_origin` replaces this server in instance_api_url
+  (another host, scheme or port, or no scheme).
+
+A proxy for everything else: with `rce` pointed at the fake as its HTTP(S) proxy
+(`Rce.proxy_through`), a request for any other host comes here instead of leaving
+the machine. The fake answers it 502 and records it in `self.proxied`: a CONNECT
+with its target (host:port), or a plain-HTTP request with its full URL.
 
 WebSocket TCP bridges: a running Run's `ports/<port>` answers a WebSocket
 upgrade like RCE's bridge (binary frames only; a text frame closes it with
@@ -348,13 +355,14 @@ class FakeRCE:
         self.user = user_out()
         self.trial = trial_status()
         self.requests: list[Request] = []
+        self.proxied: list[Request] = []  # what `rce` sent toward any other host (see above)
         self._scripted: list[tuple[str, str, Response]] = []
         self._next_run_id = 9000
         self._next_device_id = 400
         # Lifecycle timing in seconds (see the module docstring).
-        # Live RCE gives a Run's instance_api_url with its scheme, though the spec
-        # says without; set "" to answer as the spec does.
-        self.address_scheme = "http://"
+        # Where a Run's instance_api_url points: None is this server. Live RCE gives it
+        # with its scheme, though the spec says without; a test may set any origin.
+        self.address_origin: str | None = None
         self.boot_delay = 0.0
         self.input_delay = 0.0
         self.stop_delay = 0.0
@@ -454,7 +462,8 @@ class FakeRCE:
 
     def address(self, uuid: str) -> str:
         """A Run's address, as the Core API gives it in instance_api_url."""
-        return f"{self.address_scheme}{self.host}/instance/{uuid}"  # RCE's path; glossary-ok
+        origin = self.address_origin or f"http://{self.host}"
+        return f"{origin}/instance/{uuid}"  # RCE's path; glossary-ok
 
     def run_for(self, uuid: str) -> dict | None:
         """The running Cloud Device whose Run has this instance_uuid, if any."""
@@ -483,6 +492,12 @@ class FakeRCE:
     def handle(self, request: Request) -> Response:
         with self._lock:  # two `rce` processes may call at once
             return self._handle(request)
+
+    def proxy(self, request: Request) -> Response:
+        """A request `rce` sent toward another host, with the fake as its proxy."""
+        with self._lock:
+            self.proxied.append(request)
+        return Response(502, "the fake RCE proxies nowhere")
 
     def _handle(self, request: Request) -> Response:
         self.requests.append(request)
@@ -834,14 +849,16 @@ def _handler_for(fake: FakeRCE) -> type[BaseHTTPRequestHandler]:
         def _serve(self) -> None:
             url = urlsplit(self.path)
             length = int(self.headers.get("content-length") or 0)
+            # A proxy request names its target: host:port to CONNECT, or a full URL.
+            proxied = self.command == "CONNECT" or "://" in self.path
             request = Request(
                 method=self.command,
-                path=url.path,
+                path=self.path if proxied else url.path,
                 query=parse_qs(url.query),
                 headers={k.lower(): v for k, v in self.headers.items()},
                 body=self.rfile.read(length),
             )
-            response = fake.handle(request)
+            response = fake.proxy(request) if proxied else fake.handle(request)
             if response.status == NO_ANSWER.status:
                 time.sleep(response.delay)
                 self.close_connection = True
@@ -869,7 +886,7 @@ def _handler_for(fake: FakeRCE) -> type[BaseHTTPRequestHandler]:
             self.wfile.flush()
             fake.serve_bridge(self.connection, uuid, port)
 
-        do_GET = do_POST = do_PATCH = do_PUT = do_DELETE = _serve
+        do_GET = do_POST = do_PATCH = do_PUT = do_DELETE = do_CONNECT = _serve
 
         def log_message(self, *args) -> None:
             pass
