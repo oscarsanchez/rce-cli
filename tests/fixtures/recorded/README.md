@@ -33,11 +33,13 @@ Recorded 2026-11-17 by `scripts/record-live player --run` from `player` (351), R
 | `ecp-launch-dev` | ECP `launch/dev` with the test app installed: **200**, empty (Run 4300; Run 4291 answered **204**). `rce` accepts any 2xx |
 | `installer-inspect-screenshot` | the Utilities page after Screenshot with the test app in the foreground: `Screenshot ok`, and the screenshot's `<img src="pkgs/dev.jpg?time=...">` |
 
+The start's 202 isn't recorded either (`record-live` starts through `rce device start`), but it isn't invented: the fake follows the shape seen live on Run 4615 (`auto`, 2026-11-19). The Cloud Device is `pending` with `running_device: null`, and the Run (still with no `instance_api_url`) shows on a later read. The fake builds that Run from `device-running`.
+
 ## What the fake still invents
 
 | Shape | Why it is not recorded |
 |---|---|
-| `POST /devices/{id}/start` and `/stop` 202 bodies (`pending`, no `instance_api_url` yet) | `record-live` starts and stops through `rce device start`/`stop`, so it never sees them. The fake builds them from `device` and `device-running`. |
+| `POST /devices/{id}/stop` 202 body | `record-live` stops through `rce device stop`, so it never sees it. The fake answers with the Cloud Device as it is. |
 | `POST /devices` 201 (create), `PATCH /devices/{id}` | Create spends device quota for good; PATCH renames the Cloud Device. |
 | `POST /devices/{id}/snapshots` 201, a Snapshot not yet ready | Takes a Snapshot, which counts against the Snapshot quota. |
 | Error bodies: 429 `trial_device_run_limit`, 402 `trial_exhausted`, 409 `snapshot_not_ready`, 409 already running, 400 over the cap, 400 `trial_max_runtime_exceeded`, 422 Snapshot limit, gateway 429 `local_rate_limited`; a test's 409 to stopping a Cloud Device with no Run | Each needs a second Run, a used-up trial, 25 Snapshots or a start request that might succeed. Codes are from the Core API spec; the messages of the 409, 400 and 422 are guesses. What RCE answers a stop with no Run is untried. |

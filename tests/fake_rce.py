@@ -8,7 +8,9 @@ and identity each test relies on, and the recording gives everything else. The
 README there lists what the fake still invents, and why.
 
 Device lifecycle, as RCE runs it: `POST .../start` puts a Cloud Device in
-`pending` with a Run that has no address yet. After `boot_delay` seconds it is
+`pending` with a Run that has no address yet. Its 202 shows no Run
+(`running_device: null`, as on Run 4615), and reads of the Cloud Device show none
+for `run_hidden_reads` more reads (default 0: the next read shows it). After `boot_delay` seconds it is
 `running`, its Run has an address on this server, and that address's
 `input/ready` answers true after a further `input_delay`. `POST .../stop` takes
 it to `shutdown` after `stop_delay`. The delays default to 0 so tests stay
@@ -368,6 +370,8 @@ class FakeRCE:
         self.stop_delay = 0.0
         self.start_delay = 0.0  # an accepted start's answer is held this long
         self.start_dropped = False  # an accepted start gets no answer
+        self.run_hidden_reads = 0  # reads after a start that still show no Run; math.inf: never
+        self._hidden_reads: dict[int, float] = {}  # device id -> reads left that show no Run
         self.snapshot_delay = 0.0  # a new Snapshot is ready this long after it is taken
         self.snapshot_limit = 25  # Snapshots per Cloud Device, like the org's max_snapshots
         self._next_snapshot_id = 1001
@@ -531,6 +535,7 @@ class FakeRCE:
             device["status"] = status
             if status == "shutdown":
                 device["running_device"] = None
+                self._hidden_reads.pop(id, None)
                 continue
             run = device["running_device"]
             uuid = run["instance_uuid"]
@@ -540,14 +545,22 @@ class FakeRCE:
 
     # -- Core API routes -------------------------------------------------------
 
+    def _read(self, device: dict) -> dict:
+        """A Cloud Device as one read shows it: no Run yet while RCE lags its start."""
+        left = self._hidden_reads.get(device["id"], 0)
+        if not left:
+            return device
+        self._hidden_reads[device["id"]] = left - 1
+        return device | {"running_device": None}
+
     def _list_devices(self, request: Request, match: re.Match) -> Response:
-        return Response(200, list(self.devices.values()))
+        return Response(200, [self._read(d) for d in self.devices.values()])
 
     def _get_device(self, request: Request, match: re.Match) -> Response:
         device = self.devices.get(int(match[1]))
         if device is None:  # RCE's answer for a device that isn't yours: an empty 403
             return Response(403, {"detail": ""})
-        return Response(200, device)
+        return Response(200, self._read(device))
 
     def _list_snapshots(self, request: Request, match: re.Match) -> Response:
         if int(match[1]) not in self.devices:
@@ -601,7 +614,9 @@ class FakeRCE:
         )
         device.update(status="pending", running_device=run)
         self._due[device["id"]] = ("running", time.monotonic() + self.boot_delay)
-        return Response(0 if self.start_dropped else 202, device, delay=self.start_delay)
+        self._hidden_reads[device["id"]] = self.run_hidden_reads
+        answer = device | {"running_device": None}  # as live RCE answers (Run 4615)
+        return Response(0 if self.start_dropped else 202, answer, delay=self.start_delay)
 
     def _stop_device(self, request: Request, match: re.Match) -> Response:
         device = self.devices.get(int(match[1]))

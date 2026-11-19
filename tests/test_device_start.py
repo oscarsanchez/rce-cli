@@ -1,5 +1,6 @@
 """`rce device start`: a Run with safe defaults that comes back ready to use."""
 
+import math
 import time
 from datetime import datetime, timedelta
 
@@ -131,14 +132,70 @@ def test_start_json_never_includes_run_credentials(rce, fake_rce):
         assert secret not in result.stdout + result.stderr
 
 
-def test_no_wait_returns_once_rce_accepts_the_start(rce, fake_rce):
+def test_no_wait_returns_once_rce_shows_the_run_without_waiting_for_running(rce, fake_rce):
+    """Live RCE answers the start with no Run, and shows it on a later read (Run 4615)."""
     player(rce, fake_rce)
     fake_rce.boot_delay = 60
+    fake_rce.run_hidden_reads = 2
 
     run = rce.json("device", "start", "player", "--no-wait")
 
     assert run["status"] == "pending"
+    assert run["run"]["id"] == fake_rce.devices[351]["running_device"]["id"]
     assert not [r for r in fake_rce.requests if r.path.endswith("/input/ready")]
+    assert not fake_rce.requests_to("POST", STOP)
+
+
+def test_no_wait_prints_the_run_its_cost_and_auto_stop_for_people(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.boot_delay = 60
+
+    result = rce.run("device", "start", "player", "--no-wait")
+
+    assert result.returncode == 0, result.stderr
+    run_id = fake_rce.devices[351]["running_device"]["id"]
+    assert f"player (351) is starting: Run {run_id}, $0.20/h, auto-stops around" in result.stdout
+    assert not fake_rce.requests_to("POST", STOP)
+
+
+def test_no_wait_stops_a_run_rce_never_shows_and_exits_5(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.run_hidden_reads = math.inf
+
+    result = rce.run("device", "start", "player", "--no-wait", "--timeout", "1")
+
+    assert result.returncode == 5
+    assert "had no Run" in result.stderr
+    assert "stopped the Run of player (351)" in result.stderr
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
+
+
+def test_no_wait_never_exits_4_once_rce_accepted_the_start(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.start_delay = 1  # time to script the read that follows the start
+    start = rce.spawn("device", "start", "player", "--no-wait")
+    wait_for_request(fake_rce, "POST", START)
+    fake_rce.fail_next("GET", DEVICE, Response(401, {"detail": "Not authenticated"}))
+    _, stderr = start.communicate(timeout=60)
+
+    assert start.returncode == 1
+    assert "rejected the token" in stderr
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
+
+
+def test_ctrl_c_while_no_wait_waits_for_the_run_stops_it_once(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.run_hidden_reads = math.inf
+    tty = rce.interactive("device", "start", "player", "--no-wait")
+    wait_for_request(fake_rce, "POST", START)
+    looked = len(fake_rce.requests_to("GET", DEVICE))
+    wait_for_request(fake_rce, "GET", DEVICE, looked + 1)
+    tty.interrupt()
+    result = tty.finish()
+
+    assert result.returncode == 130
+    assert "stopped the Run of player (351)" in result.stderr
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
 
 
 def test_a_start_that_is_not_ready_in_time_exits_5_and_stops_the_run(rce, fake_rce):
