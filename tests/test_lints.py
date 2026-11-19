@@ -131,6 +131,37 @@ def test_private_lint_passes_without_a_terms_file(tmp_path):
     assert result.returncode == 0, result.stdout
 
 
+def worktree_of(main, tmp_path):
+    git = ["git", "-C", str(main), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "README.md"], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    worktree = tmp_path / "worktree"
+    subprocess.run([*git, "worktree", "add", "-q", str(worktree)], check=True)
+    return worktree
+
+
+def test_private_lint_in_a_worktree_reads_the_main_checkouts_terms(tmp_path):
+    main = repo_with(tmp_path / "main", {
+        ".private-terms": "4242\n",
+        "README.md": "auto is 4242\n",
+    })
+    worktree = worktree_of(main, tmp_path)
+
+    result = lint("lint_private.py", worktree)
+
+    assert result.returncode == 1
+    assert "README.md:1" in result.stdout
+
+
+def test_private_lint_in_a_worktree_passes_without_a_terms_file_anywhere(tmp_path):
+    main = repo_with(tmp_path / "main", {"README.md": "auto is 4242\n"})
+    worktree = worktree_of(main, tmp_path)
+
+    result = lint("lint_private.py", worktree)
+
+    assert result.returncode == 0, result.stdout
+
+
 def test_not_found_lint_flags_a_404_compared_with_a_status(tmp_path):
     root = repo_with(tmp_path, {
         "bin/rce": (
