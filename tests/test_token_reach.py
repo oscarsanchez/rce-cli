@@ -59,6 +59,16 @@ def test_a_websocket_command_refuses_an_untrusted_run_address(rce, fake_rce, ori
     assert_refused(result, fake_rce, host)
 
 
+@pytest.mark.parametrize(("origin", "host"), UNTRUSTED)
+def test_forward_refuses_an_untrusted_run_address_before_listening(rce, fake_rce, origin, host):
+    running_player(rce, fake_rce, origin)
+
+    result = rce.run("forward", "player", str(CONSOLE), "--local", "0")
+
+    assert_refused(result, fake_rce, host)
+    assert "Forwarding" not in result.stdout
+
+
 def test_a_run_address_without_a_scheme_is_read_as_https_and_accepted(rce, fake_rce):
     running_player(rce, fake_rce, "run.rce.roku.com")  # as RCE's spec documents instance_api_url
 

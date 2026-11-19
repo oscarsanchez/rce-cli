@@ -257,7 +257,9 @@ def require_device_name(ref: DeviceRef) -> str:
 
 
 RETRY_DELAYS = (0.5, 1.0, 2.0)  # seconds between attempts on a 429 or a gateway error
-GATEWAY_ERRORS = (502, 503, 504)  # passing on the Core API; on a Run's, dev mode off or booting
+# Passing gateway errors on the Core API. A Run's port proxy is left out: there a 502
+# or 503 is the device's own answer (dev mode off, or still booting), not a passing one.
+GATEWAY_ERRORS = (502, 503, 504)
 
 
 def is_gateway_rate_limit(response: httpx.Response) -> bool:
@@ -360,7 +362,7 @@ class CoreAPI:
         except httpx.HTTPError as error:
             raise RceError(ERROR, f"cannot reach RCE at {url}: {type(error).__name__}")
 
-    def check_reach(self, url: str) -> None:
+    def check_reach(self, url: str) -> None:  # called by send_once, open_bridge, cmd_forward
         """Exit 1, before anything is sent, unless the token may go to `url`: https (or
         wss) on rce.roku.com or a subdomain at the default port, or the Core API's own
         origin (RCE_API_URL, which tests point at the fake RCE)."""
@@ -373,8 +375,7 @@ class CoreAPI:
             ERROR,
             f"refusing to send the RCE token to {where.netloc.rpartition('@')[2]} over "
             f"{where.scheme}: rce sends it only over https to {RCE_DOMAIN} "
-            "and its subdomains at the default port, or to RCE_API_URL's own origin. "
-            "The Core API gave this address; check RCE_API_URL.",
+            "and its subdomains at the default port, or to RCE_API_URL's own origin.",
         )
 
     def error(self, response: httpx.Response) -> RceError:
@@ -583,11 +584,12 @@ def poll(timeout: float, what: str, check, on_timeout=None) -> object:
 def wait_for_run(api: CoreAPI, ref: DeviceRef, timeout: float) -> dict:
     """Wait until RCE shows the Cloud Device's Run, which its 202 to the start lacks
     while the Run is pending; exit 5 after `timeout`."""
-    return poll(
-        timeout,
-        f"{ref.display} had no Run",
-        lambda: (device := get_device(api, ref)).get("running_device") and device,
-    )
+
+    def shown() -> dict | None:
+        device = get_device(api, ref)
+        return device if device.get("running_device") else None
+
+    return poll(timeout, f"{ref.display} had no Run", shown)
 
 
 def wait_until_ready(api: CoreAPI, ref: DeviceRef, timeout: float) -> dict:
@@ -719,10 +721,10 @@ def stop_after_failed_start(api: CoreAPI, ref: DeviceRef) -> bool:
     return True
 
 
-def start_unanswered(api: CoreAPI, ref: DeviceRef, error: RceError) -> RceError:
-    """A start request that got no answer, or a 503, which RCE may have accepted all the
-    same. Any Run it has now is this command's (it found none, under the lock), so it is
-    stopped, as it is when rce can't tell."""
+def start_uncertain(api: CoreAPI, ref: DeviceRef, error: RceError) -> RceError:
+    """A start request that got no answer or a gateway error, which RCE may have
+    accepted all the same. Any Run it has now is this command's (it found none, under
+    the lock), so it is stopped, as it is when rce can't tell."""
     try:
         if not has_run(get_device(api, ref)):
             return RceError(error.code, f"{error}. {ref.display} has no Run: the start didn't happen.")
@@ -1447,13 +1449,18 @@ enabled the Cloud Device refuses ECP commands (403). In the RCE web viewer:
 CONSOLE_PORT = 8085
 
 
+def bridge_url(run: Run, port: int) -> str:
+    """The WebSocket URL of the Run's bridge to a device port."""
+    return "ws" + run.address.removeprefix("http") + f"/api/v0/ports/{port}"
+
+
 def open_bridge(api: CoreAPI, run: Run, port: int, what: str) -> ClientConnection:
     """A WebSocket to the Run's bridge for a device port, with the RCE token.
 
     RCE's gateway refuses the upgrade with 502/503 when nothing listens on the
     port, which for the console and debug ports means dev mode is off (exit 4).
     """
-    url = "ws" + run.address.removeprefix("http") + f"/api/v0/ports/{port}"
+    url = bridge_url(run, port)
     api.check_reach(url)
     try:
         return ws_connect(
@@ -1780,8 +1787,8 @@ def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
         try:
             api.request("POST", f"/devices/{ref.id}/start", json=body)
         except RceError as error:
-            if error.status in (None, 503):  # no answer, or 503: RCE may have made a Run
-                raise start_unanswered(api, ref, error)
+            if error.status in (None, *GATEWAY_ERRORS):  # RCE may have made a Run
+                raise start_uncertain(api, ref, error)
             raise start_refusal(api, error, ref, body)
         wait = wait_until_ready if options.wait else wait_for_run
         try:
@@ -2190,6 +2197,7 @@ def cmd_forward(args: argparse.Namespace) -> None:
     ref = resolve_device(args.device)
     api = CoreAPI()
     run = current_run(api, ref)
+    api.check_reach(bridge_url(run, args.port))  # before listening, not per connection
     what = f"forward to port {args.port}"
     try:
         server = socket.create_server(("127.0.0.1", local))
