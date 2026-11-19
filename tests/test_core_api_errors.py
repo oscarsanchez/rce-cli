@@ -1,7 +1,8 @@
 """How `rce` reacts when the Core API refuses, fails or rate-limits a request."""
 
+import pytest
 from conftest import TOKEN
-from fake_rce import GATEWAY_RATE_LIMIT, Response, rce_error
+from fake_rce import GATEWAY_RATE_LIMIT, UPSTREAM_ERROR, Response, rce_error
 
 DEVICES = "/api/v1/devices"
 
@@ -41,12 +42,22 @@ def test_a_rate_limit_that_persists_is_refused(rce, fake_rce):
     assert len(fake_rce.requests_to("GET", DEVICES)) == 4
 
 
-def test_a_server_error_exits_1_with_rces_message(rce, fake_rce):
-    fake_rce.fail_next("GET", DEVICES, Response(503, {"detail": "Service unavailable"}))
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_a_passing_gateway_error_on_a_read_is_retried(rce, fake_rce, status):
+    fake_rce.add_device(351, "Personal RCE Player")
+    fake_rce.fail_next("GET", DEVICES, Response(status, {"detail": "Service unavailable"}))
+
+    assert [d["id"] for d in rce.json("device", "list")] == [351]
+    assert len(fake_rce.requests_to("GET", DEVICES)) == 2
+
+
+def test_a_gateway_error_that_persists_exits_1_with_rces_message(rce, fake_rce):
+    fake_rce.fail_next("GET", DEVICES, Response(503, {"detail": "Service unavailable"}), times=10)
 
     result = rce.run("device", "list")
 
     assert result.returncode == 1
+    assert len(fake_rce.requests_to("GET", DEVICES)) == 4
     assert "503" in result.stderr
     assert "Service unavailable" in result.stderr
     assert TOKEN not in result.stderr
@@ -81,3 +92,26 @@ def test_a_gateway_rate_limit_is_retried_on_writes(rce, fake_rce):
 
     assert rce.run("device", "start", "351").returncode == 0
     assert len(fake_rce.requests_to("POST", start)) == 2
+
+
+def test_a_gateway_error_on_a_write_is_not_retried(rce, fake_rce):
+    fake_rce.add_device(351, "Personal RCE Player")
+    start = "/api/v1/devices/351/start"
+    fake_rce.fail_next("POST", start, Response(503, "upstream connect error"), times=2)
+
+    rce.run("device", "start", "351")
+
+    assert len(fake_rce.requests_to("POST", start)) == 1  # one start never makes two Runs
+
+
+def test_a_gateway_error_on_a_runs_own_read_is_not_retried(rce, fake_rce):
+    """On a Run's port proxy a 503 means dev mode is off or it is still booting."""
+    fake_rce.add_device(351, "Personal RCE Player", "stb", running=True)
+    ecp = "/instance/uuid-351/api/v0/ports/8060/http/query/device-info"  # glossary-ok
+    fake_rce.fail_next("GET", ecp, UPSTREAM_ERROR, times=2)
+
+    result = rce.run("ecp", "351", "query/device-info")
+
+    assert result.returncode == 1
+    assert "RCE answered 503: upstream connect error" in result.stderr
+    assert len(fake_rce.requests_to("GET", ecp)) == 1

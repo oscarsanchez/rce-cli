@@ -256,7 +256,8 @@ def require_device_name(ref: DeviceRef) -> str:
 # -- Core API ------------------------------------------------------------------
 
 
-RETRY_DELAYS = (0.5, 1.0, 2.0)  # seconds between attempts on a 429
+RETRY_DELAYS = (0.5, 1.0, 2.0)  # seconds between attempts on a 429 or a gateway error
+GATEWAY_ERRORS = (502, 503, 504)  # passing on the Core API; on a Run's, dev mode off or booting
 
 
 def is_gateway_rate_limit(response: httpx.Response) -> bool:
@@ -330,15 +331,23 @@ class CoreAPI:
         raise self.error(response)
 
     def send(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Send to RCE's own APIs at a full URL with the token and retries on a 429;
+        """Send to RCE's own APIs at a full URL with the token and retries (`retryable`);
         any status comes back."""
         for delay in (*RETRY_DELAYS, None):
             response = self.send_once(method, url, **kwargs)
-            retryable = is_gateway_rate_limit(response) or method == "GET"
-            if response.status_code != 429 or delay is None or not retryable:
+            if delay is None or not self.retryable(method, url, response):
                 break
             time.sleep(delay)
         return response
+
+    def retryable(self, method: str, url: str, response: httpx.Response) -> bool:
+        """Whether sending again is harmless and may be answered: the gateway's 429 (the
+        request never reached RCE), any 429 on a read, or a gateway error on a Core API
+        read. Writes are never retried on 5xx, nor are a Run's own reads."""
+        if response.status_code == 429:
+            return is_gateway_rate_limit(response) or method == "GET"
+        core_read = method == "GET" and url.startswith(f"{self.base}/")
+        return response.status_code in GATEWAY_ERRORS and core_read
 
     def send_once(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Send once, never retried: for a device's own traffic, whose answer could
