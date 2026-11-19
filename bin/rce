@@ -1875,6 +1875,8 @@ def cmd_device_stop(args: argparse.Namespace) -> None:
     api = CoreAPI()
     with device_lock(ref, args.wait_lock):
         device = get_device(api, ref)
+        if args.run is not None and (device.get("running_device") or {}).get("id") != args.run:
+            raise RceError(REFUSED, f"Run {args.run} already ended; nothing stopped.")
         require_run(device, ref)
         report = run_report(device, ref.name)  # the Run being stopped
         device = stop_run(api, ref, args.wait, args.timeout)
@@ -2472,6 +2474,9 @@ def parser() -> argparse.ArgumentParser:
 
     stop = device_cmds.add_parser("stop", parents=[output, locking], help="end a Run")
     stop.add_argument("device", help="Device Name or RCE id")
+    stop.add_argument(
+        "--run", type=int, metavar="ID", help="stop only while this Run is the current one"
+    )
     stop.add_argument("--wait", action="store_true", help="wait until it has shut down")
     stop.add_argument(
         "--timeout", type=float, default=DEFAULT_STOP_TIMEOUT, help="seconds to wait (--wait)"
