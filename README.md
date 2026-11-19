@@ -116,7 +116,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce token set [--json]` | Store the RCE token in rk's file from a hidden prompt or stdin. `--json` prints `{"path": "<rk's file>"}`. |
 | `rce token status [--json]` | The token's owner, organisation, expiry, and trial minutes left. |
 | `rce device list [--running] [--pool] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). `--pool` shows only the Pool's members, in `RCE_POOL` order, each with its Dev Snapshot's state (ready, not ready or missing: RCE deletes a Snapshot unused for 180 days), and "<free> of <members> free", a Free Cloud Device being one with no Run, pending or running. It sends only reads, one device list and one Snapshot read per member. A malformed `RCE_POOL` exits 2, as does a Retired Cloud Device in it; an RCE id RCE doesn't know exits 3. See [`device list --json`](#device-list---json). |
-| `rce device show <device> [--dev-password] [--json]` | One Cloud Device in detail. `--dev-password` also prints its stored Dev Password on stderr, bare and alone (never on stdout or in `--json`), so a pipe can take it into a CI secret; with none stored it exits 4. |
+| `rce device show <device> [--dev-password] [--json]` | One Cloud Device in detail. `--dev-password` also prints its stored Dev Password on stderr, bare and alone (never on stdout or in `--json`), so a CI secret can be set from it (see [Pipelines](#pipelines-cicd)); with none stored it exits 4. |
 | `rce device alias <device> <name> [--force] [--json]` | Give a Cloud Device a Device Name. A Cloud Device has one Device Name, so naming it again renames it. A name that already names another Cloud Device exits 2 unless `--force` moves it. A Device Name can't be all digits. <!-- glossary-ok: spec command name --> |
 | `rce device resolve <name> [--json]` | Print a Device Name's RCE id (`--json`: `{"id": 351, "type": "stb"}`). Reads only the per-user config, so it needs no token or network. |
 | `rce device create <name> --type tv\|stb [--yes] [--json]` | Create a Cloud Device named `<name>` on RCE and give it that Device Name. It asks first, showing the Cloud Devices used out of the org's maximum, because a Cloud Device is permanent and can't be deleted. `--yes` skips the prompt; without a terminal and without `--yes` it refuses (exit 2). Prints the new id. |
@@ -485,10 +485,10 @@ Dev setup is done once, by a person, from a terminal: `rce device setup-dev` pau
 ```sh
 rce snapshot list player    # the Dev Snapshot's id: the row marked DEV
 rce device show player      # the Cloud Device's RCE id
-rce device show player --dev-password 2>&1 >/dev/null | gh secret set RCE_DEV_PASSWORD --repo <owner>/<repo>
+printf %s "$(rce device show player --dev-password 2>&1 >/dev/null)" | gh secret set RCE_DEV_PASSWORD --repo <owner>/<repo>
 ```
 
-The last line sets the `RCE_DEV_PASSWORD` secret from stderr, which carries only the Dev Password, so it never shows on screen. In GitHub, under Settings > Secrets and variables > Actions, also add the secret `RCE_TOKEN` (an RCE token), and the variables `RCE_DEVICE` (the RCE id) and `RCE_SNAPSHOT` (the Dev Snapshot's id). A runner has no per-user config, so it addresses the Cloud Device by RCE id and starts from the Dev Snapshot by id.
+The last line sets the `RCE_DEV_PASSWORD` secret from stderr, which carries only the Dev Password, so it never shows on screen. `$(…)` drops the newline `rce` ends it with, which `gh secret set` would otherwise keep in the secret (the sideload then gets a 401), and `printf`, a shell builtin, keeps it out of process lists. In GitHub, under Settings > Secrets and variables > Actions, also add the secret `RCE_TOKEN` (an RCE token), and the variables `RCE_DEVICE` (the RCE id) and `RCE_SNAPSHOT` (the Dev Snapshot's id). A runner has no per-user config, so it addresses the Cloud Device by RCE id and starts from the Dev Snapshot by id.
 
 ```yaml
 name: roku
@@ -680,7 +680,7 @@ A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff f
 | `RCE_POOL` | The Pool, for `device list --pool` and `device start --pool`: a JSON object from each member's RCE id to its Dev Snapshot id, e.g. `{"375": 2001, "376": 2002}`. Keys are RCE ids (all digits), never Device Names, since a runner has none. |
 | `RCE_POOL_LOOK_SECONDS` | Test-only: the seconds between `--wait-free` looks (default 15, plus up to a third more at random), so the tests run fast. Not for pipelines. |
 | `RCE_LOCK_OWNER` | A name recorded in the device lock, so a blocked caller sees who holds it (e.g. an agent's name). |
-| `RCE_DEV_PASSWORD` | The Dev Password for every command that signs in to the installer (sideload, screenshot, selftest), for whichever Cloud Device it addresses; it wins over a stored one. For pipelines: pipe it from `rce device show <device> --dev-password` into a CI secret (see [Pipelines](#pipelines-cicd)). `setup-dev` ignores it and stores its own. |
+| `RCE_DEV_PASSWORD` | The Dev Password for every command that signs in to the installer (sideload, screenshot, selftest), for whichever Cloud Device it addresses; it wins over a stored one. For pipelines: set a CI secret from `rce device show <device> --dev-password`, without its trailing newline (see [Pipelines](#pipelines-cicd)). `setup-dev` ignores it and stores its own. |
 
 ## Claude Code settings
 
