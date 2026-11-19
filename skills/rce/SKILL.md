@@ -32,6 +32,8 @@ Free (no Run, no cost): `device list [--running]`, `device show`, `device status
 
 Runs: `device start`, `device stop [--wait]`. Both hold a per-Cloud-Device lock; exit 4 "locked" means another caller is starting or stopping it, so wait (`--wait-lock`) rather than fight it.
 
+Pool (the project sets `RCE_POOL`): `device list --pool` shows which members are free; `device start --pool` claims a Free Cloud Device and prints its `id` and `run.id`; stop it with `device stop <id> --run <run id>`, which stops only that Run.
+
 On a running Cloud Device:
 
 | Command | Use |
