@@ -1331,13 +1331,46 @@ def pool_members(pool: dict[int, int], devices: list[dict]) -> list[dict]:
     return members
 
 
-def claim(api: CoreAPI, pool: dict[int, int], options: StartOptions) -> tuple[DeviceRef, dict]:
-    """The Claim (ADR-0002): one look at the Cloud Devices, then a start of each Free Cloud
+POOL_LOOK_VAR = "RCE_POOL_LOOK_SECONDS"  # test-only: the time between --wait-free looks
+POOL_LOOK_SECONDS = 15.0  # between --wait-free looks, plus up to a third more at random
+
+
+def claim(
+    api: CoreAPI, pool: dict[int, int], options: StartOptions, wait_free: float | None
+) -> tuple[DeviceRef, dict]:
+    """The Claim (ADR-0002): a look at the Cloud Devices, then a start of each Free Cloud
     Device of the Pool in shuffled order, from its own Dev Snapshot, until RCE accepts one.
-    Returns the claimed Cloud Device and the Run as `CommandRun.start` left it."""
+    With `wait_free`, look again until that many seconds have passed. Returns the claimed
+    Cloud Device and the Run as `CommandRun.start` left it."""
+    deadline = time.monotonic() + (wait_free or 0)
     names = device_names_by_id()
-    members = pool_members(pool, api.get("/devices", items=0))
-    free = [DeviceRef(d["id"], names.get(d["id"])) for d in members if not has_run(d)]
+    while True:
+        members = pool_members(pool, api.get("/devices", items=0))
+        free = [DeviceRef(d["id"], names.get(d["id"])) for d in members if not has_run(d)]
+        if claimed := claim_free(api, pool, options, free):
+            return claimed
+        if wait_free is None:
+            raise RceError(
+                REFUSED, f"no Free Cloud Device in the Pool ({len(members)} members, none free)"
+            )
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise RceError(
+                TIMEOUT,
+                f"no Free Cloud Device in the Pool in {wait_free:g} s ({len(members)} members); "
+                "nothing started",
+            )
+        print(f"rce: {len(free)} of {len(members)} free, waiting…", file=sys.stderr)
+        interval = float(os.environ.get(POOL_LOOK_VAR) or POOL_LOOK_SECONDS)
+        # The random part keeps callers waiting together from all looking at once.
+        time.sleep(min(interval * (1 + random.random() / 3), left))
+
+
+def claim_free(
+    api: CoreAPI, pool: dict[int, int], options: StartOptions, free: list[DeviceRef]
+) -> tuple[DeviceRef, dict] | None:
+    """One pass of the Claim over the Free Cloud Devices a look found; None when every one
+    was busy or skipped."""
     random.shuffle(free)  # so callers starting together don't all try the same one first
     for ref in free:
         run = None
@@ -1351,7 +1384,7 @@ def claim(api: CoreAPI, pool: dict[int, int], options: StartOptions) -> tuple[De
                 raise
             if skip:
                 warn(skip)
-    raise RceError(REFUSED, f"no Free Cloud Device in the Pool ({len(members)} members, none free)")
+    return None
 
 
 def pool_skip(error: RceError, ref: DeviceRef, snapshot_id: int) -> str | None:
@@ -2032,7 +2065,15 @@ def check_start_flags(args: argparse.Namespace) -> None:
     if not args.pool:
         if args.device is None:
             raise RceError(USAGE, "name a <device>, or pass --pool to claim one from the Pool.")
+        if args.wait_free is not None:
+            raise RceError(
+                USAGE, "--wait-free waits for a Free Cloud Device of the Pool: pass --pool too."
+            )
         return
+    if args.wait_free is not None and not args.wait_free > 0:
+        raise RceError(
+            USAGE, f"--wait-free takes a number of seconds above 0, not {args.wait_free:g}."
+        )
     given = {
         "<device>": args.device is not None,
         "--snapshot": args.snapshot is not None,
@@ -2056,7 +2097,7 @@ def cmd_device_start(args: argparse.Namespace) -> None:
         args.snapshot, args.firmware, args.max_runtime, not args.no_wait, args.timeout
     )
     if pool:
-        ref, device = claim(api, pool, options)
+        ref, device = claim(api, pool, options, args.wait_free)
         claimed = f"Claimed Cloud Device {ref.id} (Run {device['running_device']['id']})\n"
     else:
         with command_run(api, ref, keep=True, adopt=False, wait_lock=args.wait_lock) as run:
@@ -2713,6 +2754,12 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("device", nargs="?", help="Device Name or RCE id (none with --pool)")
     start.add_argument(
         "--pool", action="store_true", help=f"claim a Free Cloud Device of the Pool (${POOL_VAR})"
+    )
+    start.add_argument(
+        "--wait-free",
+        type=float,
+        metavar="S",
+        help="with --pool: look again about every 15 s until a member is free, for up to S s",
     )
     start.add_argument("--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot)")
     start.add_argument("--firmware", help="firmware version id (default: the latest)")

@@ -78,6 +78,8 @@ def test_no_free_member_exits_4_and_starts_nothing(rce, fake_rce):
 
     assert result.returncode == 4
     assert "no Free Cloud Device in the Pool (2 members, none free)" in result.stderr
+    assert "waiting" not in result.stderr
+    assert len(fake_rce.requests_to("GET", DEVICES)) == 1
     assert result.stdout == ""
     assert starts(fake_rce) == {}
 
@@ -293,6 +295,9 @@ def test_no_wait_json_prints_the_claimed_id_and_run_id(rce, fake_rce):
         (["--pool", "375"], "--pool takes no <device>"),
         (["--pool", "--snapshot", "2001"], "--pool takes no --snapshot"),
         (["--pool", "--wait-lock"], "--pool takes no --wait-lock"),
+        (["375", "--wait-free", "60"], "--wait-free waits for a Free Cloud Device of the Pool"),
+        (["--pool", "--wait-free", "0"], "--wait-free takes a number of seconds above 0"),
+        (["--pool", "--wait-free", "-5"], "--wait-free takes a number of seconds above 0"),
         ([], "name a <device>, or pass --pool"),
     ],
 )
@@ -350,3 +355,114 @@ def test_a_retired_member_exits_2_after_only_the_look(rce, fake_rce):
     assert result.returncode == 2
     assert "remove it from RCE_POOL" in result.stderr
     assert [r.path for r in fake_rce.requests] == [DEVICES]
+
+
+# -- --wait-free S -------------------------------------------------------------
+
+
+def waiting(rce) -> None:
+    """Looks a few milliseconds apart instead of about 15 s (the test-only variable)."""
+    rce.env["RCE_POOL_LOOK_SECONDS"] = "0.01"
+
+
+def test_wait_free_claims_a_member_freed_after_some_looks(rce, fake_rce):
+    pool(rce, fake_rce, {375: 2001, 376: 2002}, running=(375, 376))
+    waiting(rce)
+    fake_rce.free_after("GET", DEVICES, 376, times=3)  # another job stops it after our 3rd look
+
+    result = rce.run("device", "start", "--pool", "--wait-free", "30")
+
+    assert result.returncode == 0, result.stderr
+    assert len(fake_rce.requests_to("GET", DEVICES)) == 4
+    assert starts(fake_rce).keys() == {376}
+    assert len(starts(fake_rce)[376]) == 1
+    assert f"Claimed Cloud Device 376 (Run {fake_rce.devices[376]['running_device']['id']})" in result.stdout
+
+
+def test_wait_free_exits_5_after_s_seconds_with_nothing_started(rce, fake_rce):
+    pool(rce, fake_rce, {375: 2001, 376: 2002}, running=(375, 376))
+    waiting(rce)
+    began = time.monotonic()
+
+    result = rce.run("device", "start", "--pool", "--wait-free", "0.5")
+
+    assert result.returncode == 5
+    assert time.monotonic() - began >= 0.5
+    assert "no Free Cloud Device in the Pool in 0.5 s (2 members); nothing started" in result.stderr
+    assert result.stdout == ""
+    assert len(fake_rce.requests_to("GET", DEVICES)) > 1
+    assert starts(fake_rce) == {}
+    assert not stops(fake_rce)
+
+
+@pytest.mark.parametrize(
+    ("response", "words"),
+    [
+        (Response(401, {"detail": "Not authenticated"}), "RCE rejected the token"),
+        (TRIAL_EXHAUSTED, "the RCE free trial is used up"),
+        (TRIAL_RUN_LIMIT, "the RCE trial runs one Cloud Device at a time"),
+        (OVER_CAP, "--max-runtime 999999 s is more than your organisation's maximum"),
+    ],
+)
+def test_a_refusal_every_member_would_get_ends_the_wait_at_once(rce, fake_rce, response, words):
+    pool(rce, fake_rce, {375: 2001, 376: 2002}, running=(375, 376))
+    waiting(rce)
+    fake_rce.free_after("GET", DEVICES, 375)
+    fake_rce.fail_next("POST", start_path(375), response)
+
+    result = rce.run("device", "start", "--pool", "--wait-free", "30", "--max-runtime", "999999")
+
+    assert result.returncode == 4
+    assert words in result.stderr
+    assert result.stdout == ""
+    assert result.stderr.count("free, waiting…") == 1  # the first look; none after the refusal
+    assert starts(fake_rce).keys() == {375}
+    assert not stops(fake_rce)
+
+
+def test_each_look_says_how_many_are_free_on_stderr_and_json_stdout_is_unchanged(rce, fake_rce):
+    pool(rce, fake_rce, {375: 2001, 376: 2002}, running=(375,))
+    waiting(rce)
+    fake_rce.take_after("GET", DEVICES, 376)  # another job claims it just after our 1st look
+    fake_rce.free_after("GET", DEVICES, 375, times=2)  # and frees another after our 2nd
+
+    result = rce.run("device", "start", "--pool", "--wait-free", "30", "--json")
+
+    assert result.returncode == 0, result.stderr
+    waits = [line for line in result.stderr.splitlines() if "waiting…" in line]
+    assert waits == ["rce: 1 of 2 free, waiting…", "rce: 0 of 2 free, waiting…"]
+    claimed = json.loads(result.stdout)
+    assert claimed["id"] == 375
+    assert claimed["run"]["id"] == fake_rce.devices[375]["running_device"]["id"]
+
+
+def test_ctrl_c_while_waiting_exits_130_with_nothing_started(rce, fake_rce):
+    pool(rce, fake_rce, {375: 2001, 376: 2002}, running=(375, 376))
+    rce.env["RCE_POOL_LOOK_SECONDS"] = "30"  # so the Ctrl-C lands while it waits
+    tty = rce.interactive("device", "start", "--pool", "--wait-free", "120")
+    tty.expect("0 of 2 free, waiting…")
+    tty.interrupt()
+    result = tty.finish()
+
+    assert result.returncode == 130
+    assert result.stdout == ""
+    assert len(fake_rce.requests_to("GET", DEVICES)) == 1
+    assert starts(fake_rce) == {}
+    assert not stops(fake_rce)
+
+
+def test_ctrl_c_after_a_claim_made_while_waiting_stops_its_run(rce, fake_rce):
+    pool(rce, fake_rce, {375: 2001}, running=(375,))
+    waiting(rce)
+    fake_rce.free_after("GET", DEVICES, 375)
+    fake_rce.boot_delay = 60  # the claimed Run takes its time to come up
+    tty = rce.interactive("device", "start", "--pool", "--wait-free", "30")
+    wait_for_request(fake_rce, "POST", start_path(375))
+    looked = len(fake_rce.requests_to("GET", "/api/v1/devices/375"))
+    wait_for_request(fake_rce, "GET", "/api/v1/devices/375", looked + 1)
+    tty.interrupt()
+    result = tty.finish()
+
+    assert result.returncode == 130
+    assert "stopped the Run of Cloud Device 375" in result.stderr
+    assert stops(fake_rce) == ["/api/v1/devices/375/stop"]
