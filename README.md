@@ -543,7 +543,7 @@ Pin `rce` to a release tag (`v0.1.0` above) and change the tag to upgrade. Repla
 | 5 | Timeout: RCE didn't answer, a Run or Snapshot wasn't ready (or a Run shut down) in time, or `console --until` saw no match in time |
 | 130 | Interrupted (Ctrl-C). A Run that `device start` asked for or was waiting on, or that `device setup-dev` started, is stopped first. |
 
-A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff for any request; other 429s are retried only on reads. Requests to a device's own ports (the installer, ECP) are never retried: the device's answer passes through as is, so it can't prove the request didn't reach the device.
+A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff for any request; other 429s are retried only on reads. A passing gateway error (502, 503 or 504) on a Core API read, such as `device list`, `device status` or the waits inside `device start`, is retried the same way; one that persists exits 1. Writes are never retried on a 5xx, so one command never makes two Runs. Requests to a device's own ports (the installer, ECP) are never retried: the device's answer passes through as is, so it can't prove the request didn't reach the device.
 
 ## Environment
 
