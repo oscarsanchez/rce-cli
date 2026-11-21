@@ -4,7 +4,7 @@
 
 `rce-cli` is a client for Roku® Cloud Emulator, not affiliated with or endorsed by Roku, Inc. ROKU is a trademark and/or registered trademark of Roku, Inc. in the United States and other countries.
 
-Issues are welcome on GitHub Issues; pull requests aren't accepted yet. To report a security problem, see [SECURITY.md](SECURITY.md). Licence: [MIT](LICENSE).
+Issues are welcome on GitHub Issues; pull requests aren't accepted yet. To report a security problem, see [SECURITY.md](SECURITY.md). What changed in each release, and how to upgrade: [CHANGELOG.md](CHANGELOG.md). Licence: [MIT](LICENSE).
 
 ## Prerequisites
 
@@ -53,15 +53,6 @@ ln -sfn "$PWD/skills/rce" ~/.cursor/skills/rce    # from the rce-cli clone
 ```
 
 Cursor doesn't run the plugin's Stop hook, so nothing warns you when its agent finishes with a Run still billing. Check with `rce device list --running`.
-
-### Moving from the old install
-
-The old `install.sh` also linked the skill into `~/.claude/skills/rce`, and the old settings block added the Stop hook to `~/.claude/settings.json`. When you switch to the plugin, remove both, or Claude loads the skill twice and warns twice:
-
-1. `rm ~/.claude/skills/rce` (removes only the link; the checkout stays).
-2. In `~/.claude/settings.json`, delete the `Stop` hook entry whose command ends in `hooks/rce-stop-hook`. Keep the `permissions` block.
-
-If you keep the CLI install too, pull and run `./install.sh` again: `rce` moved to `bin/rce`.
 
 ## Getting started
 
