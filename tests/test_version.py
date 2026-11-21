@@ -1,10 +1,17 @@
-"""`rce --version`: say exactly which rce ran, with no token, config or network."""
+"""`rce --version`: say exactly which rce ran, with no token, config or network. The docs
+follow that version: the pipeline recipes pin `rce` to it, and the CHANGELOG has its notes."""
 
 from __future__ import annotations
 
 import re
 
 from conftest import REPO
+from doc_pages import PIPELINES
+
+
+def version(rce) -> str:
+    """The version `rce --version` prints, without the leading "rce "."""
+    return rce.run("--version").stdout.removeprefix("rce ").strip()
 
 
 def test_version_prints_the_version_without_a_token_or_rce(rce, fake_rce):
@@ -20,20 +27,17 @@ PIN = re.compile(r"Pin `rce` to a release tag \(`v(\d+\.\d+\.\d+)`")
 
 
 def test_pipeline_recipes_pin_rce_to_the_version_it_prints(rce):
-    recipes = (REPO / "docs" / "how-to" / "pipelines.md").read_text()
+    recipes = PIPELINES.read_text()
     downloads, pins = DOWNLOAD.findall(recipes), PIN.findall(recipes)
-
-    version = rce.run("--version").stdout.removeprefix("rce ").strip()
 
     assert len(downloads) >= 2, "expected both pipeline recipes to download bin/rce at a tag"
     assert len(pins) >= 1, "expected the pipelines page's 'Pin `rce` to a release tag' line"
-    assert set(downloads + pins) == {version}
+    assert set(downloads + pins) == {version(rce)}
 
 
 def test_changelog_has_notes_for_the_version_it_prints(rce):
     changelog = (REPO / "CHANGELOG.md").read_text()
+    printed = version(rce)
 
-    version = rce.run("--version").stdout.removeprefix("rce ").strip()
-
-    heading = re.compile(rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", re.MULTILINE)
-    assert heading.search(changelog), f"CHANGELOG.md has no '## [{version}] - YYYY-MM-DD' heading"
+    heading = re.compile(rf"^## \[{re.escape(printed)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", re.MULTILINE)
+    assert heading.search(changelog), f"CHANGELOG.md has no '## [{printed}] - YYYY-MM-DD' heading"

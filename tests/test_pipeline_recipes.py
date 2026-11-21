@@ -12,23 +12,24 @@ from typing import NamedTuple
 import pytest
 
 from conftest import REPO
+from doc_pages import PIPELINES
 
 COMMAND = re.compile(r"(?<![\w/.-])rce((?: [a-z][\w-]*){1,2})([^|]*)")  # flags up to a pipe
 START, STOP = "Start the Run", "Stop the Run"  # the recipes' step names
 DEVICE = "device"  # the recipe for one Cloud Device, before the page's sections
 POOL = "Parallel jobs on a Pool"  # the Pool recipe's section
 RECIPES = (DEVICE, POOL)
-PAGE = REPO / "docs" / "how-to" / "pipelines.md"
 
 
-def pipeline_section() -> str:
-    page = PAGE.read_text()
-    assert page.startswith("# Pipelines (CI/CD)\n"), f"{PAGE.relative_to(REPO)} has no 'Pipelines (CI/CD)' title"
+def recipes_body() -> str:
+    """The pipelines page after its title, with shell line continuations joined."""
+    page = PIPELINES.read_text()
+    assert page.startswith("# Pipelines (CI/CD)\n"), f"{PIPELINES.relative_to(REPO)} has no 'Pipelines (CI/CD)' title"
     return page.split("\n", 1)[1].replace("\\\n", " ")
 
 
 def workflow(recipe: str) -> str:
-    parts = pipeline_section().split("\n## ")
+    parts = recipes_body().split("\n## ")
     part = parts[0] if recipe == DEVICE else next((p for p in parts if p.startswith(recipe)), "")
     block = re.search(r"```yaml\n(.*?)```", part, re.S)
     assert block, f"the {recipe} recipe has no yaml block"
@@ -127,7 +128,7 @@ def started(recipe: str) -> str:
 
 
 def test_pipeline_recipes_use_only_commands_and_flags_rce_has(rce):
-    calls = [COMMAND.search(line) for line in pipeline_section().splitlines()]
+    calls = [COMMAND.search(line) for line in recipes_body().splitlines()]
     calls = [call for call in calls if call]
     assert calls, "the recipe calls no rce command"
 
@@ -248,7 +249,7 @@ def test_the_secret_line_hands_gh_the_dev_password_with_no_trailing_newline(tmp_
     """`rce` ends the Dev Password with a newline and `gh secret set` keeps its stdin whole,
     so a secret piped straight from stderr holds "password\\n": `rce` v0.2.0 signs in with it
     and gets a 401. The line works with every version."""
-    [line] = [line for line in pipeline_section().splitlines() if "gh secret set RCE_DEV_PASSWORD" in line]
+    [line] = [line for line in recipes_body().splitlines() if "gh secret set RCE_DEV_PASSWORD" in line]
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     secret = tmp_path / "secret"
