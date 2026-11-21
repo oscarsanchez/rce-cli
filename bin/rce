@@ -208,6 +208,11 @@ def _device_entry(name: str) -> dict:
     return _device_entries()[name]
 
 
+def _new_device_entry(device_id: int, device_type: str) -> dict:
+    """The fields a Device Name's table starts with: its Cloud Device's RCE id and type."""
+    return {"id": device_id, "type": device_type}
+
+
 @dataclass(frozen=True)
 class DeviceRef:
     id: int
@@ -226,6 +231,12 @@ class DeviceRef:
 
 def is_raw_id(text: str) -> bool:
     return re.fullmatch(r"[0-9]+", text) is not None
+
+
+def check_device_name_format(name: str) -> None:
+    """A new Device Name must not read as an RCE id."""
+    if is_raw_id(name):
+        raise RceError(USAGE, f"a Device Name can't be all digits ({name!r}): it reads as an RCE id")
 
 
 def config_names_by_id() -> dict[int, str]:
@@ -249,12 +260,6 @@ def config_device_type(name: str) -> str:
     return _device_entry(name)["type"]
 
 
-def config_check_name(name: str) -> None:
-    """A new Device Name must not read as an RCE id."""
-    if is_raw_id(name):
-        raise RceError(USAGE, f"a Device Name can't be all digits ({name!r}): it reads as an RCE id")
-
-
 def name_taken(name: str, holder: int) -> str:
     return f"Device Name {name!r} already names Cloud Device {holder}."
 
@@ -270,14 +275,14 @@ def config_name_device(device_id: int, device_type: str, name: str, force: bool)
         raise RceError(USAGE, f"{name_taken(name, holder)} Pass --force to move it.")
     old = next((old for old, entry in names.items() if entry["id"] == device_id), None)
     entry = names.pop(old) if old else {}
-    names[name] = {**entry, "id": device_id, "type": device_type}
+    names[name] = {**entry, **_new_device_entry(device_id, device_type)}
     _save_config(config)
 
 
-def config_add_name(name: str, device_id: int, device_type: str) -> None:
+def config_add_name(device_id: int, device_type: str, name: str) -> None:
     """Record a new Cloud Device under its Device Name."""
     config = _load_config()
-    config.setdefault("devices", {})[name] = {"id": device_id, "type": device_type}
+    config.setdefault("devices", {})[name] = _new_device_entry(device_id, device_type)
     _save_config(config)
 
 
@@ -2153,7 +2158,7 @@ def cmd_device_show(args: argparse.Namespace) -> None:
 
 
 def cmd_device_alias(args: argparse.Namespace) -> None:
-    config_check_name(args.name)
+    check_device_name_format(args.name)
     device = CoreAPI().get(f"/devices/{config_resolve(args.device).id}")
     config_name_device(device["id"], device["device_type"], args.name, args.force)
     emit(
@@ -2295,7 +2300,7 @@ def cmd_device_stop(args: argparse.Namespace) -> None:
 
 
 def cmd_device_create(args: argparse.Namespace) -> None:
-    config_check_name(args.name)
+    check_device_name_format(args.name)
     if (holder := config_holder(args.name)) is not None:
         raise RceError(USAGE, name_taken(args.name, holder))
     api = CoreAPI()
@@ -2309,7 +2314,7 @@ def cmd_device_create(args: argparse.Namespace) -> None:
             "The new one is permanent, cannot be deleted, and uses quota for good.",
         )
     device = api.request("POST", "/devices", json={"name": args.name, "device_type": args.type})
-    config_add_name(args.name, device["id"], args.type)
+    config_add_name(device["id"], args.type, args.name)
     emit(
         args,
         {"id": device["id"], "device_name": args.name, "type": args.type},
