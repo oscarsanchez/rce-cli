@@ -2665,9 +2665,9 @@ def cmd_selftest(args: argparse.Namespace) -> None:
         if not args.json:
             print(f"ok   {number} {title}: {detail}", flush=True)
 
-    def start() -> str:
-        run = start_run(api, ref, StartOptions(max_runtime=SELFTEST_MAX_RUNTIME))["running_device"]
-        return f"Run {run['id']} of {name} takes input"
+    def start() -> str:  # `run`: the selftest's command_run, below
+        running = run.start(StartOptions(max_runtime=SELFTEST_MAX_RUNTIME))["running_device"]
+        return f"Run {running['id']} of {name} takes input"
 
     def info() -> str:
         found = device_info(ecp(api, ref, "query/device-info"))
@@ -2710,13 +2710,13 @@ def cmd_selftest(args: argparse.Namespace) -> None:
 
     def stop() -> str:
         report = run_report(get_device(api, ref), ref.name)
-        stop_run(api, ref, wait=True)
+        run.stop(wait=True)
         return (
             f"Run {report['run']['id']} ran {report['elapsed_s'] // 60} min, "
             f"about {usd(report['elapsed_cost_usd'])}; {name} is shut down"
         )
 
-    with device_lock(ref, args.wait_lock):
+    with command_run(api, ref, keep=False, adopt=False, wait_lock=args.wait_lock) as run:
         try:
             step("start", start)  # a start that fails stops its own Run
             try:
