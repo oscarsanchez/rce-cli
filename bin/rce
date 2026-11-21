@@ -2768,8 +2768,8 @@ def cmd_selftest(args: argparse.Namespace) -> None:
 
     def console() -> str:
         deadline = time.monotonic() + SELFTEST_STEP_TIMEOUT
-        run = current_run(api, ref)
-        if not any(marker in line for line in console_lines(api, ref, run, deadline)):
+        current = current_run(api, ref)
+        if not any(marker in line for line in console_lines(api, ref, current, deadline)):
             raise RceError(TIMEOUT, f"the console showed no {marker} in {SELFTEST_STEP_TIMEOUT} s")
         return f"read {marker} on port {CONSOLE_PORT}"
 
@@ -2777,9 +2777,9 @@ def cmd_selftest(args: argparse.Namespace) -> None:
         return f"{len(take_screenshot(Installer.open(api, ref)))} bytes"
 
     def forward() -> str:
-        run = current_run(api, ref)
+        current = current_run(api, ref)
         with socket.create_server(("127.0.0.1", 0)) as server:
-            start_forwarding(api, ref, run, CONSOLE_PORT, server)
+            start_forwarding(api, ref, current, CONSOLE_PORT, server)
             local = server.getsockname()
             if not read_forwarded(local, marker, SELFTEST_STEP_TIMEOUT):
                 raise RceError(
