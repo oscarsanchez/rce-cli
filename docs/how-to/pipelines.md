@@ -2,7 +2,7 @@
 
 A pipeline can run your app on a Cloud Device: start a Run from the Dev Snapshot, sideload, wait for a console line, and always stop.
 
-Dev setup is done once, by a person, from a terminal: `rce device setup-dev` pauses for steps only a person can do (see [Dev setup](../../README.md#dev-setup)), so a pipeline can't do it. After it, put what the pipeline needs into its settings:
+Dev setup is done once, by a person, from a terminal: `rce device setup-dev` pauses for steps only a person can do (see [Dev setup](../reference/commands.md#dev-setup)), so a pipeline can't do it. After it, put what the pipeline needs into its settings:
 
 ```sh
 rce snapshot list player    # the Dev Snapshot's id: the row marked DEV
@@ -80,7 +80,7 @@ Pin `rce` to a release tag (`v0.2.1` above) and change the tag to upgrade. Repla
 
 ## Parallel jobs on a Pool
 
-Jobs that run at the same time each claim a Free Cloud Device from a Pool (see [Claiming from a Pool](../../README.md#claiming-from-a-pool)), so there is no `concurrency` group. A person sets up each member once, from a terminal, with `rce device setup-dev` (see [Dev setup](../../README.md#dev-setup)). Then, in GitHub, under your organisation's Settings > Secrets and variables > Actions, add the variable `RCE_POOL` (each member's RCE id to its Dev Snapshot id, e.g. `{"375": 2001, "376": 2002}`, from `rce snapshot list <member>`) and the secrets `RCE_TOKEN` and `RCE_DEV_PASSWORDS`, a JSON object from each member's RCE id to its Dev Password, e.g. `{"375": "<its Dev Password>", "376": "<its Dev Password>"}`.
+Jobs that run at the same time each claim a Free Cloud Device from a Pool (see [Claiming from a Pool](../reference/commands.md#claiming-from-a-pool)), so there is no `concurrency` group. A person sets up each member once, from a terminal, with `rce device setup-dev` (see [Dev setup](../reference/commands.md#dev-setup)). Then, in GitHub, under your organisation's Settings > Secrets and variables > Actions, add the variable `RCE_POOL` (each member's RCE id to its Dev Snapshot id, e.g. `{"375": 2001, "376": 2002}`, from `rce snapshot list <member>`) and the secrets `RCE_TOKEN` and `RCE_DEV_PASSWORDS`, a JSON object from each member's RCE id to its Dev Password, e.g. `{"375": "<its Dev Password>", "376": "<its Dev Password>"}`.
 
 With `RCE_POOL` set in your terminal too, `rce device list --pool` shows each member, its Dev Snapshot's state and how many are free.
 

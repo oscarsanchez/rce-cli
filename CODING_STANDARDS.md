@@ -9,7 +9,7 @@ Read during review. Mechanical rules are enforced by the check command (see [doc
   The Pool's exception (ADR-0002): a Pool try whose start got a 503, 502, 504 or no answer, or a Ctrl-C during that request, sends no stop, because a Run found there may be another job's Claim. `--max-runtime` bounds the cost.
 - A command that spends quota for good (create) or changes saved device state (retire, setup-dev, Snapshot changes) asks first. Only an explicit flag skips the prompt, and a missing TTY means "no", not "yes".
 - Cost shown to the user comes from RCE's timestamps and one rate constant (`USD_PER_MINUTE`), never a rate copied into code elsewhere.
-  RCE has no rate endpoint, so that constant is the source of truth. Docs written for people (README, skill) may quote $0.20/h; update them with the constant.
+  RCE has no rate endpoint, so that constant is the source of truth. Docs may quote it; update them with the constant: the README's Costs and the skill ($0.20/h), and `docs/reference/commands.md` (the per-device-minute price in Runs, and `hourly_cost_usd` in its JSON).
 
 ## Secrets
 
@@ -23,7 +23,7 @@ Read during review. Mechanical rules are enforced by the check command (see [doc
 - Device Names, Dev Passwords and Dev Snapshot ids live only in the per-user config. The token lives only in rk's file or the environment.
   `RCE_DEV_PASSWORD` overrides the stored Dev Password (for pipelines). It is read only from the environment, never a flag.
   `RCE_POOL`, a CI variable from each Pool member's RCE id to its Dev Snapshot id, is the other exception: a runner has no per-user config (ADR-0002).
-- Exit codes and `--json` shapes are a public contract: change them deliberately, with the README and skill updated in the same change.
+- Exit codes and `--json` shapes are a public contract: change them deliberately, with the reference (`docs/reference/commands.md` for a `--json` shape, `docs/reference/exit-codes.md` for an exit code) and the skill's summary updated in the same change.
 - Every user-visible change adds its line under `## [Unreleased]` in `CHANGELOG.md`, in the same commit; a break to an exit code or a `--json` shape starts with "Breaking:". The `release: vX.Y.Z` commit renames that heading to `## [X.Y.Z] - YYYY-MM-DD` and adds a new, empty `## [Unreleased]`.
 
 ## Tests
