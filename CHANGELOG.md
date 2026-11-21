@@ -6,6 +6,7 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The pipeline recipes (one Cloud Device, and parallel jobs on a Pool) moved from the README to [docs/how-to/pipelines.md](docs/how-to/pipelines.md); the README's `#pipelines-cicd` anchor is gone.
 - The Cursor setup and the Claude Code settings moved from the README to their own pages, [docs/how-to/cursor.md](docs/how-to/cursor.md) and [docs/how-to/claude-code-settings.md](docs/how-to/claude-code-settings.md), both listed in the README's new Docs list.
 
 ## [0.2.1] - 2026-11-19

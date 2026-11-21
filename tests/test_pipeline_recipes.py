@@ -1,5 +1,5 @@
-"""The README's pipeline recipes: every rce command and flag they use is in rce's own help,
-and each stop step stops only the Run its job started."""
+"""The pipeline recipes in docs/how-to/pipelines.md: every rce command and flag they use is
+in rce's own help, and each stop step stops only the Run its job started."""
 
 from __future__ import annotations
 
@@ -15,20 +15,20 @@ from conftest import REPO
 
 COMMAND = re.compile(r"(?<![\w/.-])rce((?: [a-z][\w-]*){1,2})([^|]*)")  # flags up to a pipe
 START, STOP = "Start the Run", "Stop the Run"  # the recipes' step names
-DEVICE = "device"  # the recipe for one Cloud Device, before the section's subsections
-POOL = "Parallel jobs on a Pool"  # the Pool recipe's subsection
+DEVICE = "device"  # the recipe for one Cloud Device, before the page's sections
+POOL = "Parallel jobs on a Pool"  # the Pool recipe's section
 RECIPES = (DEVICE, POOL)
+PAGE = REPO / "docs" / "how-to" / "pipelines.md"
 
 
 def pipeline_section() -> str:
-    readme = (REPO / "README.md").read_text()
-    section = re.search(r"^## Pipelines \(CI/CD\)\n(.*?)(?=^## )", readme, re.S | re.M)
-    assert section, "README has no 'Pipelines (CI/CD)' section"
-    return section.group(1).replace("\\\n", " ")
+    page = PAGE.read_text()
+    assert page.startswith("# Pipelines (CI/CD)\n"), f"{PAGE.relative_to(REPO)} has no 'Pipelines (CI/CD)' title"
+    return page.split("\n", 1)[1].replace("\\\n", " ")
 
 
 def workflow(recipe: str) -> str:
-    parts = pipeline_section().split("\n### ")
+    parts = pipeline_section().split("\n## ")
     part = parts[0] if recipe == DEVICE else next((p for p in parts if p.startswith(recipe)), "")
     block = re.search(r"```yaml\n(.*?)```", part, re.S)
     assert block, f"the {recipe} recipe has no yaml block"
