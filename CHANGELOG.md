@@ -4,9 +4,16 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-22
+
 ### Fixed
 
 - `rce selftest --live` now also stops its Run when reading the Run's final status fails before its stop step, with the usual "stopped the Run … so it doesn't keep billing" warning. Before, that Run was left running.
+- `rce device setup-dev --wait-lock` reads its saved progress after it gets the device lock, so it resumes from the steps another `setup-dev` finished while it waited.
+
+### Changed
+
+- The pipeline recipes download `rce` at `v0.2.3`.
 
 ## [0.2.2] - 2026-11-21
 
@@ -87,7 +94,8 @@ If you keep the CLI install too, pull and run `./install.sh` again: `rce` moved 
 - `rce`, a command-line client for Roku® Cloud Emulator, and a Claude Code plugin whose skill teaches Claude to use it. From any directory and any Roku project, it lists, starts and stops Cloud Devices, sideloads, reads the BrightScript console, sends ECP commands and remote keys, takes screenshots, forwards debugger ports, sets up developer mode with a Dev Snapshot, and creates and retires Cloud Devices. It needs only uv, on macOS or Linux, and your own RCE token.
 - Three installs: the Claude Code plugin (the skill, the Stop hook that warns about a Run still billing, and `rce` on Claude's PATH), the terminal install (clone and `./install.sh`), and, for pipelines, the single `bin/rce` script downloaded at a release tag.
 
-[Unreleased]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/oscarsanchez/rce-cli/compare/v0.1.0...v0.2.0

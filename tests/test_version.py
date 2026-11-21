@@ -18,7 +18,7 @@ def test_version_prints_the_version_without_a_token_or_rce(rce, fake_rce):
     result = rce.run("--version")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "rce 0.2.2\n"
+    assert result.stdout == "rce 0.2.3\n"
     assert fake_rce.requests == []
 
 
