@@ -4,6 +4,10 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+
+- The pipeline recipes (one Cloud Device, and parallel jobs on a Pool) moved from the README to [docs/how-to/pipelines.md](docs/how-to/pipelines.md); the README's `#pipelines-cicd` anchor is gone. The README now ends with a Docs list naming every other page.
+
 ## [0.2.1] - 2026-11-19
 
 ### Fixed
