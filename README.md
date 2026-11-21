@@ -76,6 +76,9 @@ A Run costs $0.20 per hour, billed by the minute from the moment the start is re
 
 ## Docs
 
+- [Command reference](docs/reference/commands.md): what each command does and its `--json` shape
+- [Exit codes](docs/reference/exit-codes.md): each exit code, what it means and the usual next move
+- [Environment](docs/reference/environment.md): the environment variables `rce` reads
 - [Pipelines (CI/CD)](docs/how-to/pipelines.md): run `rce` in a pipeline, on one Cloud Device or a Pool
 - [Cursor](docs/how-to/cursor.md): use `rce` and its skill from Cursor
 - [Claude Code settings](docs/how-to/claude-code-settings.md): permission rules for the plugin, and its Stop hook
@@ -83,6 +86,3 @@ A Run costs $0.20 per hour, billed by the minute from the moment the start is re
 - [GLOSSARY.md](GLOSSARY.md): the words `rce` and these docs use
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release
 - [SECURITY.md](SECURITY.md): reporting a vulnerability
-- [Command reference](docs/reference/commands.md): what each command does and its `--json` shape
-- [Exit codes](docs/reference/exit-codes.md): each exit code and what it means
-- [Environment](docs/reference/environment.md): the environment variables `rce` reads

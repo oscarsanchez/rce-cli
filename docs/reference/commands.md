@@ -339,7 +339,7 @@ The Developer Settings screens can't be driven blind with keys, so a person navi
 
 `stopped_run` is whether `setup-dev` stopped a Run at step 8.
 
-## Console
+## `console`
 
 `rce console <device>` opens the Run's BrightScript console (device port 8085) through RCE's WebSocket TCP bridge and prints each line as it arrives, until interrupted. It only reads: the bridge takes binary frames only, and `console` sends none. Bytes are reassembled across frames before they are split into lines, so a line is never matched in halves.
 
@@ -354,7 +354,7 @@ With dev mode off, RCE's gateway refuses the bridge (502/503 `upstream connect e
 rce console player --until 'app ready' --timeout 120 --strip-ansi
 ```
 
-## Forward
+## `forward`
 
 `rce forward <device> <port>` listens on `127.0.0.1:<port>` (or `--local N`) and bridges each TCP connection to the Run's WebSocket bridge for that device port, in both directions, as binary frames. Each connection gets its own bridge, several at once. It prints the address it listens on (`--json`: `{"id": 351, "device_name": "player", "port": 8085, "local": 8085}`) and keeps running until interrupted (exit 130).
 
@@ -375,7 +375,7 @@ rce forward player 8085 &
 nc 127.0.0.1 8085
 ```
 
-## Selftest
+## `selftest`
 
 The offline tests are the pytest suite (see [Development](../development.md)); `rce selftest` without `--live` says so and exits 2.
 

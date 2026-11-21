@@ -4,11 +4,17 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+
+- A bug report form for new issues. It asks for `rce --version`, the OS, the install, the command and its exit code, and first warns never to paste an RCE token, a Dev Password or `rce`'s config files. The new-issue page also links private vulnerability reporting.
+- This CHANGELOG, back-filled to `v0.1.0-rc.1`. Upgrade steps sit under the release that needs them: the README's "Moving from the old install" is now under 0.2.0's Upgrading, and the README's `#moving-from-the-old-install` anchor is gone.
+
 ### Changed
 
-- The pipeline recipes (one Cloud Device, and parallel jobs on a Pool) moved from the README to [docs/how-to/pipelines.md](docs/how-to/pipelines.md); the README's `#pipelines-cicd` anchor is gone.
-- The Cursor setup and the Claude Code settings moved from the README to their own pages, [docs/how-to/cursor.md](docs/how-to/cursor.md) and [docs/how-to/claude-code-settings.md](docs/how-to/claude-code-settings.md), both listed in the README's new Docs list.
-- The reference moved out of the README: every command's behaviour and `--json` shape is in `docs/reference/commands.md`, the exit codes in `docs/reference/exit-codes.md` and the environment variables in `docs/reference/environment.md`. The README links them from its Docs list, and the `rce` skill links only these pages instead of the whole README. Links to the README's old anchors for these sections (`#exit-codes`, `#environment`, `#runs` and the others) no longer resolve.
+- The pipeline recipes (one Cloud Device, and parallel jobs on a Pool) moved from the README to [docs/how-to/pipelines.md](docs/how-to/pipelines.md); the README's `#pipelines-cicd` and `#parallel-jobs-on-a-pool` anchors are gone.
+- The Cursor setup and the Claude Code settings moved from the README to their own pages, [docs/how-to/cursor.md](docs/how-to/cursor.md) and [docs/how-to/claude-code-settings.md](docs/how-to/claude-code-settings.md), both listed in the README's new Docs list; the README's `#claude-code-settings` anchor is gone.
+- The reference moved out of the README: every command's behaviour and `--json` shape is in `docs/reference/commands.md`, the exit codes, each with its usual next move, in `docs/reference/exit-codes.md` and the environment variables in `docs/reference/environment.md`. The README links them from its Docs list, and the `rce` skill links only these pages instead of the whole README. Links to the README's old anchors for these sections no longer resolve: `#token`, `#commands`, `#device-names`, `#token-status---json`, `#device-list---json`, `#device-show---json`, `#device-alias---json`, `#device-retire---json`, `#runs`, `#claiming-from-a-pool`, `#device-lock`, `#device-start-stop-and-status---json`, `#usage---json`, `#using-a-running-cloud-device`, `#key---json`, `#ecp---json`, `#launch---json`, `#sideload-and-screenshot`, `#sideload---json`, `#screenshot---json`, `#snapshots`, `#snapshot-list---json`, `#snapshot-use-as-dev---json`, `#dev-setup`, `#device-setup-dev---json`, `#console`, `#forward`, `#selftest`, `#exit-codes` and `#environment`. <!-- glossary-ok: an old README heading's slug -->
+- The development notes (the check, the lints and the Seam A tests) moved from the README to [docs/development.md](docs/development.md); the README's `#development` and `#tests-seam-a` anchors are gone.
 
 ## [0.2.1] - 2026-11-19
 

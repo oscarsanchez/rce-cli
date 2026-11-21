@@ -23,7 +23,7 @@ Read during review. Mechanical rules are enforced by the check command (see [doc
 - Device Names, Dev Passwords and Dev Snapshot ids live only in the per-user config. The token lives only in rk's file or the environment.
   `RCE_DEV_PASSWORD` overrides the stored Dev Password (for pipelines). It is read only from the environment, never a flag.
   `RCE_POOL`, a CI variable from each Pool member's RCE id to its Dev Snapshot id, is the other exception: a runner has no per-user config (ADR-0002).
-- Exit codes and `--json` shapes are a public contract: change them deliberately, with the reference (`docs/reference/commands.md` for a `--json` shape, `docs/reference/exit-codes.md` for an exit code) and the skill's summary updated in the same change.
+- Exit codes and `--json` shapes are a public contract: change them deliberately, with the reference (`docs/reference/commands.md` for a `--json` shape, `docs/reference/exit-codes.md` for an exit code) and, for an exit code, the skill's summary updated in the same change.
 - Every user-visible change adds its line under `## [Unreleased]` in `CHANGELOG.md`, in the same commit; a break to an exit code or a `--json` shape starts with "Breaking:". The `release: vX.Y.Z` commit renames that heading to `## [X.Y.Z] - YYYY-MM-DD` and adds a new, empty `## [Unreleased]`.
 
 ## Tests

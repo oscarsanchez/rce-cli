@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from conftest import RCE, REPO
-from test_doc_links import HEADING, prose
+from doc_pages import HEADING, INLINE_CODE, prose
 
 REFERENCE = REPO / "docs" / "reference"
 SUBCOMMAND = re.compile(r"^ {4}([a-z][\w-]*)", re.M)  # a `--help` entry; any second name follows in ()
@@ -15,9 +15,24 @@ def headings(page: str) -> list[str]:
     return [h[1].lower() for _, line in prose(REFERENCE / page) if (h := HEADING.match(line))]
 
 
-def names(heading: str, command: str) -> bool:
-    """The heading names every word of the command (`device stop` in "`device start`, `stop`…")."""
-    return all(re.search(rf"(?<![\w-]){re.escape(word)}(?![\w-])", heading) for word in command.split())
+def heading_names(heading: str, command: str) -> bool:
+    """The heading's code spans name every word of the command (`device stop` in
+    "`device start`, `stop`…"); its prose doesn't (`lock` isn't in "Device lock")."""
+    code = " ".join(INLINE_CODE.findall(heading))
+    return all(re.search(rf"(?<![\w-]){re.escape(word)}(?![\w-])", code) for word in command.split())
+
+
+def undocumented(commands: list[str], on_page: list[str]) -> list[str]:
+    """The commands no heading names."""
+    return [c for c in commands if not any(heading_names(h, c) for h in on_page)]
+
+
+def test_a_heading_covers_a_command_only_by_naming_it_in_code():
+    on_page = ["device lock", "`device start`, `stop` and `status --json`"]
+
+    missing = undocumented(["lock", "device lock", "device start", "device stop", "device status"], on_page)
+
+    assert missing == ["lock", "device lock"]
 
 
 def test_every_subcommand_has_a_heading_on_the_commands_page(rce):
@@ -28,7 +43,7 @@ def test_every_subcommand_has_a_heading_on_the_commands_page(rce):
         commands += [f"{group} {name}".strip() for name in SUBCOMMAND.findall(result.stdout)]
 
     on_page = headings("commands.md")
-    missing = [c for c in commands if not any(names(h, c) for h in on_page)]
+    missing = undocumented(commands, on_page)
 
     assert {"device stop", "snapshot take", "selftest"} <= set(commands)
     assert not missing, f"no heading on docs/reference/commands.md for: {', '.join(missing)}"
