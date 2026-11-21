@@ -19,14 +19,14 @@ DOWNLOAD = re.compile(r"/rce-cli/(?:releases/download/)?v(\d+\.\d+\.\d+)/")  # a
 PIN = re.compile(r"Pin `rce` to a release tag \(`v(\d+\.\d+\.\d+)`")
 
 
-def test_readme_pins_rce_to_the_version_it_prints(rce):
-    readme = (REPO / "README.md").read_text()
-    downloads, pins = DOWNLOAD.findall(readme), PIN.findall(readme)
+def test_pipeline_recipes_pin_rce_to_the_version_it_prints(rce):
+    recipes = (REPO / "docs" / "how-to" / "pipelines.md").read_text()
+    downloads, pins = DOWNLOAD.findall(recipes), PIN.findall(recipes)
 
     version = rce.run("--version").stdout.removeprefix("rce ").strip()
 
     assert len(downloads) >= 2, "expected both pipeline recipes to download bin/rce at a tag"
-    assert len(pins) >= 1, "expected the README's 'Pin `rce` to a release tag' line"
+    assert len(pins) >= 1, "expected the pipelines page's 'Pin `rce` to a release tag' line"
     assert set(downloads + pins) == {version}
 
 

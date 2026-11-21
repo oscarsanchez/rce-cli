@@ -6,6 +6,7 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The pipeline recipes (one Cloud Device, and parallel jobs on a Pool) moved from the README to [docs/how-to/pipelines.md](docs/how-to/pipelines.md); the README's `#pipelines-cicd` anchor is gone.
 - The Cursor setup and the Claude Code settings moved from the README to their own pages, [docs/how-to/cursor.md](docs/how-to/cursor.md) and [docs/how-to/claude-code-settings.md](docs/how-to/claude-code-settings.md), both listed in the README's new Docs list.
 - The reference moved out of the README: every command's behaviour and `--json` shape is in `docs/reference/commands.md`, the exit codes in `docs/reference/exit-codes.md` and the environment variables in `docs/reference/environment.md`. The README links them from its Docs list, and the `rce` skill links only these pages instead of the whole README. Links to the README's old anchors for these sections (`#exit-codes`, `#environment`, `#runs` and the others) no longer resolve.
 
