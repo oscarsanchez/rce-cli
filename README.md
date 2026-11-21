@@ -23,7 +23,7 @@ claude plugin marketplace add oscarsanchez/rce-cli
 claude plugin install rce-cli@rce-cli
 ```
 
-The plugin gives Claude the `rce` skill, the Stop hook, and `rce` on the PATH of Claude's Bash tool. It can't add permission rules; for those, see [Claude Code settings](#claude-code-settings).
+The plugin gives Claude the `rce` skill, the Stop hook, and `rce` on the PATH of Claude's Bash tool. It can't add permission rules; for those, see [Claude Code settings](docs/how-to/claude-code-settings.md).
 
 The plugin's `rce` is on Claude's PATH only, not your terminal's. The steps you run yourself at a terminal (`rce token set`, `rce device setup-dev`) need the CLI install below too. With both installed, your own PATH comes first, so Claude also runs the CLI install's `rce`.
 
@@ -43,16 +43,7 @@ A pipeline downloads the single `bin/rce` script at a release tag, with no clone
 
 ### Cursor
 
-Cursor's agent runs the terminal install's `rce`, so do that install first. The plugin's `rce` is not on Cursor's PATH.
-
-Signed in to Cursor, its agent also loads skills from installed Claude Code plugins, so with the plugin installed it already has the `rce` skill: add nothing, or Cursor loads it twice. Without the plugin, or if Cursor doesn't list `rce` among its skills, link the skill from your clone:
-
-```sh
-mkdir -p ~/.cursor/skills
-ln -sfn "$PWD/skills/rce" ~/.cursor/skills/rce    # from the rce-cli clone
-```
-
-Cursor doesn't run the plugin's Stop hook, so nothing warns you when its agent finishes with a Run still billing. Check with `rce device list --running`.
+Cursor's agent runs the terminal install's `rce` and the plugin's skill. See [Cursor](docs/how-to/cursor.md).
 
 ## Getting started
 
@@ -673,50 +664,11 @@ A gateway rate limit (429 marked `local_rate_limited`) is retried with backoff f
 | `RCE_LOCK_OWNER` | A name recorded in the device lock, so a blocked caller sees who holds it (e.g. an agent's name). |
 | `RCE_DEV_PASSWORD` | The Dev Password for every command that signs in to the installer (sideload, screenshot, selftest), for whichever Cloud Device it addresses; it wins over a stored one. For pipelines: set a CI secret from `rce device show <device> --dev-password` (see [Pipelines](#pipelines-cicd)). `rce` drops any trailing CR and LF characters (`\r`, `\n`) from it, which a secret set from a pipe, a file or a paste can keep; any other whitespace is part of the Dev Password. `setup-dev` ignores it and stores its own. |
 
-## Claude Code settings
-
-The plugin's `rce` skill teaches Claude the commands, the costs, and its rules: ask before create, retire, setup-dev, token set and Snapshot changes, and stop every Run it started. A plugin can't ship permission rules, so back those rules up by merging this into `~/.claude/settings.json`:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(rce device list *)",
-      "Bash(rce device show *)",
-      "Bash(rce device status *)",
-      "Bash(rce device resolve *)",
-      "Bash(rce device start *)",
-      "Bash(rce device stop *)",
-      "Bash(rce usage *)",
-      "Bash(rce console *)",
-      "Bash(rce ecp *)",
-      "Bash(rce key *)",
-      "Bash(rce launch *)",
-      "Bash(rce screenshot *)",
-      "Bash(rce forward *)",
-      "Bash(rce sideload *)",
-      "Bash(rce snapshot list *)",
-      "Bash(rce token status *)"
-    ],
-    "ask": [
-      "Bash(rce device create *)",
-      "Bash(rce device retire *)",
-      "Bash(rce device setup-dev *)",
-      "Bash(rce token set *)",
-      "Bash(rce snapshot take *)",
-      "Bash(rce snapshot use-as-dev *)",
-      "Bash(rce selftest *)"
-    ]
-  }
-}
-```
-
-- **Permissions**: the free and Run commands run without a prompt. Each allow rule names a full subcommand, so none covers a permanent one, and the `ask` rules always prompt for the permanent ones and for `selftest` (a billed Run): Claude Code checks `ask` before `allow`, so even a broad rule such as `Bash(rce *)` added later can't approve them. `device alias` and anything else unlisted prompt as usual. A trailing ` *` also matches the bare command (`rce usage`). <!-- glossary-ok: spec command name -->
-- **Stop hook** (`hooks/rce-stop-hook`): the plugin registers it, so it needs nothing in your settings, and it runs the plugin's own `rce`, so it works without the CLI install. When Claude finishes a turn, it runs `rce device list --running --json` and, if any Cloud Device has a Run, shows a warning naming each one and how long it has billed (`RCE Run still billing: player (351) for 12 min. …`). It never blocks Claude. It stays silent when nothing is running, `rce` can't run, no token is configured, or RCE is unreachable, and gives up after 5 s.
-
 ## Docs
 
+- [Cursor](docs/how-to/cursor.md): use `rce` and its skill from Cursor
+- [Claude Code settings](docs/how-to/claude-code-settings.md): permission rules for the plugin, and its Stop hook
+- [Development](docs/development.md): the check, the lints and the tests
 - [GLOSSARY.md](GLOSSARY.md): the words `rce` and these docs use
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release
 - [SECURITY.md](SECURITY.md): reporting a vulnerability
-- [Development](docs/development.md): the check, the lints and the tests
