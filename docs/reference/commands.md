@@ -377,7 +377,7 @@ nc 127.0.0.1 8085
 
 ## Selftest
 
-The offline tests are the pytest suite (see Development); `rce selftest` without `--live` says so and exits 2.
+The offline tests are the pytest suite (see [Development](../development.md)); `rce selftest` without `--live` says so and exits 2.
 
 `rce selftest --live [--device NAME]` tests `rce` end to end on a real Cloud Device: the one named by `--device`, or the only Device Name in the per-user config. It needs a Dev Password (the one `rce device setup-dev` stores, or `RCE_DEV_PASSWORD`), and checks for it before spending anything. It shows the projected minutes and cost (about 5 min, at RCE's rate) and the Run's cap (10 min), then asks; `--yes` skips the question, and without a terminal it starts nothing (exit 2). It holds the device lock throughout (`--wait-lock` waits for it).
 

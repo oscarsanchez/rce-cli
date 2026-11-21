@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Enabled with `git config core.hooksPath .githooks` (see README).
+# Enabled with `git config core.hooksPath .githooks` (see docs/development.md).
 # Git exports GIT_DIR, GIT_INDEX_FILE etc. to hooks. Clear them so git commands
 # run by the check (e.g. `git init` in a temp dir) can't touch this repo.
 root="$(git rev-parse --show-toplevel)"

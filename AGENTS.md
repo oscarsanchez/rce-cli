@@ -1,6 +1,6 @@
 # rce-cli
 
-CLI (`rce`) and Claude skill for using Roku Cloud Emulator from any Roku project: list, start, stop, sideload, console, ECP, screenshot, forward ports, set up dev mode, create and retire Cloud Devices. Vocabulary: `GLOSSARY.md`. Review rules: `CODING_STANDARDS.md`. Before starting a Run or any billed RCE call: `docs/agents/live-rce.md`. Checking a new user's install at a tag: `docs/agents/fresh-install-check.md`.
+CLI (`rce`) and Claude skill for using Roku Cloud Emulator from any Roku project: list, start, stop, sideload, console, ECP, screenshot, forward ports, set up dev mode, create and retire Cloud Devices. Vocabulary: `GLOSSARY.md`. Review rules: `CODING_STANDARDS.md`. Running or changing the check, lints or tests: `docs/development.md`. Before starting a Run or any billed RCE call: `docs/agents/live-rce.md`. Checking a new user's install at a tag: `docs/agents/fresh-install-check.md`.
 
 ## Agent skills
 

@@ -304,35 +304,12 @@ The plugin's `rce` skill teaches Claude the commands, the costs, and its rules: 
 - **Permissions**: the free and Run commands run without a prompt. Each allow rule names a full subcommand, so none covers a permanent one, and the `ask` rules always prompt for the permanent ones and for `selftest` (a billed Run): Claude Code checks `ask` before `allow`, so even a broad rule such as `Bash(rce *)` added later can't approve them. `device alias` and anything else unlisted prompt as usual. A trailing ` *` also matches the bare command (`rce usage`). <!-- glossary-ok: spec command name -->
 - **Stop hook** (`hooks/rce-stop-hook`): the plugin registers it, so it needs nothing in your settings, and it runs the plugin's own `rce`, so it works without the CLI install. When Claude finishes a turn, it runs `rce device list --running --json` and, if any Cloud Device has a Run, shows a warning naming each one and how long it has billed (`RCE Run still billing: player (351) for 12 min. …`). It never blocks Claude. It stays silent when nothing is running, `rce` can't run, no token is configured, or RCE is unreachable, and gives up after 5 s.
 
-## Development
-
-```sh
-git config core.hooksPath .githooks   # once per clone: run the check before every commit
-scripts/check                          # the one check: the lints + the test suite
-```
-
-`scripts/check` runs:
-
-- **glossary lint** (`scripts/lint_glossary.py`): fails on any `_Avoid_` term from GLOSSARY.md in code or docs. Matching is whole-word and case-sensitive. For a legitimate use, such as an RCE API path, put `glossary-ok` on the line (`<!-- glossary-ok -->` in Markdown). `.scratch/` is not linted.
-- **test-import lint** (`scripts/lint_test_imports.py`): fails when a test imports `rce` (or uses importlib, runpy or imp to load it) instead of running it as a subprocess.
-- **not-found lint** (`scripts/lint_not_found.py`): fails when `bin/rce` compares a status with 404. RCE answers "not found" with a 404 or an empty 403, a rule `exit_code_for` holds once; code tests `error.code == NOT_FOUND`. A line that must compare (the rule itself, a device's own ECP 404) carries `not-found-ok`.
-- **private lint** (`scripts/lint_private.py`): fails when a term listed in `.private-terms` (gitignored, one per line, `#` for comments) appears in a file git would publish. List there the ids of your own Cloud Devices and Snapshots, so examples in code and docs use invented ones. Without the file (CI, a fresh clone) it passes.
-- **tests** (`uv run pytest -n auto`, in parallel with pytest-xdist; about 30 s). The harness drops `GIT_*` variables, so a test that runs git never touches the repo it is run from.
-
-`core.hooksPath` is relative and shared by every worktree, so each worktree runs its own branch's `.githooks/pre-commit`. A change to the hook reaches a worktree only once that branch merges it.
-
-### Tests (Seam A)
-
-Tests run the real `rce` as a subprocess against a fake RCE and assert only on what a user sees: stdout, the exit code, files left behind and the requests the fake received.
-
-- `tests/fake_rce.py`: the fake RCE, a local HTTP server serving the Core API under `/api/v1` and each Run's Instance API, including the WebSocket TCP bridges. Its answers are built from real RCE answers recorded in `tests/fixtures/recorded/` (its README lists what the fake still invents); re-record them with `scripts/record-live` (`--run` starts one billed Run). Add a route by appending to `FakeRCE.routes`; force an error or rate limit with `fail_next(...)`; inspect traffic with `requests` / `requests_to(...)`. `address_origin` puts a Run's address on another host, scheme or port (or none); with `rce.proxy_through(fake)` the fake is `rce`'s HTTP(S) proxy, so whatever `rce` sends toward any other host lands in `proxied` instead of leaving the machine. Script a bridge with `bridge(port)`: the frames it sends each client, `echo`, and the bytes it `received`; `dev_mode = False` makes bridges answer 503. The installer (port 80) checks `X-Authorization` and the Digest for `dev_password`, installs into `installed_archive` (the same bytes again are "identical"), answers installs with the recorded Install pages (a failure is a 400, served for the next install after a test sets `next_install_fails`), takes screenshots only while `active_app` is the dev app, and records each multipart form in `forms`. Launching the dev app sends each later console client (port 8085) the lines its BrightScript `print`s as string literals (`console_output`), as if it ran.
-- `tests/conftest.py`: the `rce` fixture runs `rce` with a temp `HOME` and `XDG_CONFIG_HOME`, `RCE_API_URL` pointing at the fake, and the token stored in rk's config file.
-
 ## Docs
 
-- [GLOSSARY.md](GLOSSARY.md): the words `rce` and its docs use.
-- [CHANGELOG.md](CHANGELOG.md): what changed in each release, and how to upgrade.
-- [SECURITY.md](SECURITY.md): how to report a security problem.
-- [Command reference](docs/reference/commands.md): what each command does and its `--json` shape.
-- [Exit codes](docs/reference/exit-codes.md): each exit code and what it means.
-- [Environment](docs/reference/environment.md): the environment variables `rce` reads.
+- [GLOSSARY.md](GLOSSARY.md): the words `rce` and these docs use
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release
+- [SECURITY.md](SECURITY.md): reporting a vulnerability
+- [Development](docs/development.md): the check, the lints and the tests
+- [Command reference](docs/reference/commands.md): what each command does and its `--json` shape
+- [Exit codes](docs/reference/exit-codes.md): each exit code and what it means
+- [Environment](docs/reference/environment.md): the environment variables `rce` reads
