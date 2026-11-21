@@ -4,6 +4,10 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Fixed
+
+- `rce selftest --live` now also stops its Run when reading the Run's final status fails before its stop step, with the usual "stopped the Run … so it doesn't keep billing" warning. Before, that Run was left running.
+
 ## [0.2.2] - 2026-11-21
 
 ### Added
