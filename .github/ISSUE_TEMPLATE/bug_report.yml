@@ -1,0 +1,69 @@
+name: Bug report
+description: Something `rce` did that it shouldn't, or didn't do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue is public.** Never paste an RCE token, a Dev Password or anything from `rce`'s config files (`~/roku-rce-config.json`, `~/.config/roku-rce/devices.toml`). If you already did, revoke the token in the RCE web console. A vulnerability goes to private reporting, not here: see [SECURITY.md](https://github.com/oscarsanchez/rce-cli/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version  # glossary-ok: GitHub form key
+      description: What `rce --version` prints.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS  # glossary-ok: GitHub form key
+      options:
+        - macOS
+        - Linux
+        - WSL
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install  # glossary-ok: GitHub form key
+      options:
+        - Claude Code plugin
+        - Terminal (clone and install.sh)
+        - Pipeline (bin/rce at a release tag)
+        - Cursor
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command  # glossary-ok: GitHub form key
+      description: The command you ran.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: exit-code
+    attributes:
+      label: Exit code  # glossary-ok: GitHub form key
+      description: What `echo $?` printed right after the command.
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened  # glossary-ok: GitHub form key
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected  # glossary-ok: GitHub form key
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output  # glossary-ok: GitHub form key
+      description: What `rce` printed. Where the command takes `--json`, run it again with `--json` and paste that too. Check it for tokens and Dev Passwords first.
+      render: text
