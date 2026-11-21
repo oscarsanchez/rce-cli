@@ -1,6 +1,6 @@
 # Coding standards
 
-Read during review. Mechanical rules are enforced by the check command (see README), not restated here. These are the judgement calls.
+Read during review. Mechanical rules are enforced by the check command (see [docs/development.md](docs/development.md)), not restated here. These are the judgement calls.
 
 ## Money and permanence
 
