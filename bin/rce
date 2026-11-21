@@ -707,95 +707,6 @@ def run_report(device: dict, device_name: str | None) -> dict:
     }
 
 
-def start_refusal(api: CoreAPI, error: RceError, ref: DeviceRef, body: dict) -> RceError:
-    """RCE's refusal of a start, in plain words saying what to do (exit 4), keeping RCE's
-    status and code."""
-
-    def refused(message: str) -> RceError:
-        return RceError(REFUSED, message, error.rce_code, error.status)
-
-    if error.rce_code == "trial_device_run_limit":
-        names = config_names_by_id()
-        running = [
-            describe(d["id"], names.get(d["id"]) or d["name"])
-            for d in api.get("/devices", items=0)
-            if has_run(d)
-        ]
-        return refused(
-            "the RCE trial runs one Cloud Device at a time, and "
-            f"{', '.join(running) or 'another Cloud Device'} is running. "
-            "rce never stops it for you: stop it with `rce device stop <device>` "
-            "if you're done with it.",
-        )
-    messages = {
-        "trial_exhausted": "the RCE free trial is used up. Subscribe through AWS Marketplace "
-        "to keep starting Cloud Devices.",
-        "snapshot_not_ready": f"Snapshot {body['snapshot_id']} is not ready yet: RCE is still "
-        "saving it. Try again in a minute, or pick another with --snapshot.",
-        "trial_max_runtime_exceeded": f"--max-runtime {body['max_runtime']} s is more than the "
-        "trial time you have left. Lower it; `rce usage` shows the minutes left.",
-    }
-    if error.rce_code in messages:
-        return refused(messages[error.rce_code])
-    if error.status == 400 and error.rce_code is None:  # RCE gives over-cap no code
-        most = api.get("/user/me")["organisation"]["max_project_runtime"]
-        if body["max_runtime"] > most:
-            return refused(
-                f"--max-runtime {body['max_runtime']} s is more than your organisation's "
-                f"maximum of {most} s ({most / 3600:g} h). Lower it.",
-            )
-    if error.code != REFUSED:
-        return error
-    return refused(
-        f"RCE refused to start {ref.display}: {error}. Check that --max-runtime "
-        "is within your organisation's maximum, --firmware fits the device type, and the "
-        "Cloud Device isn't already running or busy.",
-    )
-
-
-def stop_after_failed_start(api: CoreAPI, ref: DeviceRef) -> bool:
-    """A start that fails or is interrupted after RCE accepted it must not keep billing.
-    Whether nothing is left billing: the Run is stopped, or a stop that failed found
-    no Run (a start RCE never got)."""
-    name = ref.display
-    try:
-        stop_run(api, ref)
-    except RceError as error:
-        try:
-            billing = "is" if has_run(get_device(api, ref)) else None
-        except RceError:
-            billing = "may be"
-        if billing is None:
-            warn(f"{name} has no Run: the start didn't happen, or its Run already ended.")
-            return True
-        warn(
-            f"could not stop the Run of {name} ({error}). It {billing} billing: stop it with "
-            f"`rce device stop {ref.arg}`."
-        )
-        return False
-    warn(f"stopped the Run of {name} so it doesn't keep billing.")
-    return True
-
-
-def start_uncertain(api: CoreAPI, ref: DeviceRef, error: RceError) -> RceError:
-    """A start request that got no answer or a gateway error, which RCE may have
-    accepted all the same. Any Run it has now is this command's (it found none, under
-    the lock), so it is stopped, as it is when rce can't tell."""
-    try:
-        if not has_run(get_device(api, ref)):
-            return RceError(error.code, f"{error}. {ref.display} has no Run: the start didn't happen.")
-    except RceError as lookup:
-        stopped = stop_after_failed_start(api, ref)
-        outcome = "nothing is billing" if stopped else "a Run may be billing"
-        return RceError(
-            error.code,
-            f"{error}. rce could not check whether RCE started a Run anyway ({lookup}), "
-            f"so it asked RCE to stop one: {outcome}.",
-        )
-    outcome = "rce stopped it" if stop_after_failed_start(api, ref) else "it is still billing"
-    return RceError(error.code, f"{error}. RCE had started a Run anyway, and {outcome}.")
-
-
 def stop_run(
     api: CoreAPI, ref: DeviceRef, wait: bool = False, timeout: float = DEFAULT_STOP_TIMEOUT
 ) -> dict:
@@ -922,10 +833,10 @@ class CommandRun:
             except RceError as error:
                 if error.status not in (None, *GATEWAY_ERRORS):
                     self.start_unknown = False
-                    raise start_refusal(api, error, ref, body)
+                    raise self._refusal(error, body)
                 if self.leave_unknown_start:  # RCE may have made a Run
                     raise
-                raise start_uncertain(api, ref, error)
+                raise self._uncertain(error)
             self.start_unknown = False
             self.started = True
             wait = wait_until_ready if options.wait else wait_for_run
@@ -948,10 +859,97 @@ class CommandRun:
         self.device = stop_run(self.api, self.ref, wait)
         return self.device
 
-    def _stop_after_failure(self) -> None:
-        """Today's stop after a failed start, with its messages; tried once."""
+    def _refusal(self, error: RceError, body: dict) -> RceError:
+        """RCE's refusal of a start, in plain words saying what to do (exit 4), keeping
+        RCE's status and code."""
+        api, ref = self.api, self.ref
+
+        def refused(message: str) -> RceError:
+            return RceError(REFUSED, message, error.rce_code, error.status)
+
+        if error.rce_code == "trial_device_run_limit":
+            names = config_names_by_id()
+            running = [
+                describe(d["id"], names.get(d["id"]) or d["name"])
+                for d in api.get("/devices", items=0)
+                if has_run(d)
+            ]
+            return refused(
+                "the RCE trial runs one Cloud Device at a time, and "
+                f"{', '.join(running) or 'another Cloud Device'} is running. "
+                "rce never stops it for you: stop it with `rce device stop <device>` "
+                "if you're done with it.",
+            )
+        messages = {
+            "trial_exhausted": "the RCE free trial is used up. Subscribe through AWS Marketplace "
+            "to keep starting Cloud Devices.",
+            "snapshot_not_ready": f"Snapshot {body['snapshot_id']} is not ready yet: RCE is still "
+            "saving it. Try again in a minute, or pick another with --snapshot.",
+            "trial_max_runtime_exceeded": f"--max-runtime {body['max_runtime']} s is more than the "
+            "trial time you have left. Lower it; `rce usage` shows the minutes left.",
+        }
+        if error.rce_code in messages:
+            return refused(messages[error.rce_code])
+        if error.status == 400 and error.rce_code is None:  # RCE gives over-cap no code
+            most = api.get("/user/me")["organisation"]["max_project_runtime"]
+            if body["max_runtime"] > most:
+                return refused(
+                    f"--max-runtime {body['max_runtime']} s is more than your organisation's "
+                    f"maximum of {most} s ({most / 3600:g} h). Lower it.",
+                )
+        if error.code != REFUSED:
+            return error
+        return refused(
+            f"RCE refused to start {ref.display}: {error}. Check that --max-runtime "
+            "is within your organisation's maximum, --firmware fits the device type, and the "
+            "Cloud Device isn't already running or busy.",
+        )
+
+    def _uncertain(self, error: RceError) -> RceError:
+        """A start request that got no answer or a gateway error, which RCE may have
+        accepted all the same. Any Run it has now is this command's (it found none, under
+        the lock), so it is stopped, as it is when rce can't tell."""
+        api, ref = self.api, self.ref
+        try:
+            if not has_run(get_device(api, ref)):
+                return RceError(
+                    error.code, f"{error}. {ref.display} has no Run: the start didn't happen."
+                )
+        except RceError as lookup:
+            stopped = self._stop_after_failure()
+            outcome = "nothing is billing" if stopped else "a Run may be billing"
+            return RceError(
+                error.code,
+                f"{error}. rce could not check whether RCE started a Run anyway ({lookup}), "
+                f"so it asked RCE to stop one: {outcome}.",
+            )
+        outcome = "rce stopped it" if self._stop_after_failure() else "it is still billing"
+        return RceError(error.code, f"{error}. RCE had started a Run anyway, and {outcome}.")
+
+    def _stop_after_failure(self) -> bool:
+        """A start that fails or is interrupted after RCE accepted it must not keep
+        billing; tried once. Whether nothing is left billing: the Run is stopped, or a
+        stop that failed found no Run (a start RCE never got)."""
         self.stop_tried = True
-        stop_after_failed_start(self.api, self.ref)
+        api, ref = self.api, self.ref
+        name = ref.display
+        try:
+            stop_run(api, ref)
+        except RceError as error:
+            try:
+                billing = "is" if has_run(get_device(api, ref)) else None
+            except RceError:
+                billing = "may be"
+            if billing is None:
+                warn(f"{name} has no Run: the start didn't happen, or its Run already ended.")
+                return True
+            warn(
+                f"could not stop the Run of {name} ({error}). It {billing} billing: stop it "
+                f"with `rce device stop {ref.arg}`."
+            )
+            return False
+        warn(f"stopped the Run of {name} so it doesn't keep billing.")
+        return True
 
 
 @contextmanager
@@ -976,12 +974,6 @@ def command_run(
         finally:
             if not keep and run.started and not run.stop_tried:
                 run._stop_after_failure()
-
-
-def start_run(api: CoreAPI, ref: DeviceRef, options: StartOptions) -> dict:
-    """`CommandRun.start` for callers that hold the device lock themselves (setup-dev,
-    selftest) until they move onto `command_run`."""
-    return CommandRun(api, ref, adopt=False).start(options)
 
 
 # -- a running Cloud Device ----------------------------------------------------
