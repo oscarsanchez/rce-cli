@@ -194,7 +194,7 @@ def core_reads(api, ref) -> dict[str, httpx.Response]:
 
 def refuse_if_running(devices: list[dict]) -> None:
     """Start nothing while any Cloud Device has a Run: it may be someone else's."""
-    names = rce.device_names_by_id()
+    names = rce.config_names_by_id()
     running = [rce.describe(d["id"], names.get(d["id"])) for d in devices if rce.has_run(d)]
     if running:
         raise rce.RceError(
@@ -321,7 +321,7 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # stop the Run on kill too
     try:
         api = rce.CoreAPI()
-        ref = rce.resolve_device(args.device)
+        ref = rce.config_resolve(args.device)
         answers = core_reads(api, ref)
         known = {rce.load_token()[0], answers["user-me"].json()["id"]}  # the account's id
         if args.run:

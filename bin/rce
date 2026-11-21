@@ -222,11 +222,28 @@ def is_raw_id(text: str) -> bool:
     return re.fullmatch(r"[0-9]+", text) is not None
 
 
-def device_names_by_id() -> dict[int, str]:
+def config_names_by_id() -> dict[int, str]:
+    """Each named Cloud Device's Device Name, by RCE id."""
     return {entry["id"]: name for name, entry in device_entries().items()}
 
 
-def check_device_name(name: str) -> None:
+def config_names() -> list[str]:
+    """The Device Names in the per-user config, sorted."""
+    return sorted(device_entries())
+
+
+def config_holder(name: str) -> int | None:
+    """The RCE id of the Cloud Device a Device Name names; None while the name is free."""
+    entry = device_entries().get(name)
+    return entry["id"] if entry else None
+
+
+def config_device_type(name: str) -> str:
+    """The device type stored with a Device Name."""
+    return device_entry(name)["type"]
+
+
+def config_check_name(name: str) -> None:
     """A new Device Name must not read as an RCE id."""
     if is_raw_id(name):
         raise RceError(USAGE, f"a Device Name can't be all digits ({name!r}): it reads as an RCE id")
@@ -236,9 +253,38 @@ def name_taken(name: str, holder: int) -> str:
     return f"Device Name {name!r} already names Cloud Device {holder}."
 
 
-def resolve_device(ref: str) -> DeviceRef:
+def config_name_device(device_id: int, device_type: str, name: str, force: bool) -> None:
+    """Give a Cloud Device a Device Name. One Device Name per Cloud Device: renaming keeps
+    the fields stored with it. Exit 2 when another Cloud Device holds the name, unless
+    forced; a forced move drops what was stored for the old holder."""
+    config = load_config()
+    names = config.setdefault("devices", {})
+    holder = names.get(name, {}).get("id", device_id)
+    if holder != device_id and not force:
+        raise RceError(USAGE, f"{name_taken(name, holder)} Pass --force to move it.")
+    old = next((old for old, entry in names.items() if entry["id"] == device_id), None)
+    entry = names.pop(old) if old else {}
+    names[name] = {**entry, "id": device_id, "type": device_type}
+    save_config(config)
+
+
+def config_add_name(name: str, device_id: int, device_type: str) -> None:
+    """Record a new Cloud Device under its Device Name."""
+    config = load_config()
+    config.setdefault("devices", {})[name] = {"id": device_id, "type": device_type}
+    save_config(config)
+
+
+def config_drop_name(name: str) -> None:
+    """Drop a Device Name and everything stored with it."""
+    config = load_config()
+    del config["devices"][name]
+    save_config(config)
+
+
+def config_resolve(ref: str) -> DeviceRef:
     """A Device Name or a raw RCE id, as every command that takes a device accepts."""
-    names = device_names_by_id()
+    names = config_names_by_id()
     by_name = {name: id for id, name in names.items()}
     if ref in by_name:
         return DeviceRef(by_name[ref], ref)
@@ -669,7 +715,7 @@ def start_refusal(api: CoreAPI, error: RceError, ref: DeviceRef, body: dict) -> 
         return RceError(REFUSED, message, error.rce_code, error.status)
 
     if error.rce_code == "trial_device_run_limit":
-        names = device_names_by_id()
+        names = config_names_by_id()
         running = [
             describe(d["id"], names.get(d["id"]) or d["name"])
             for d in api.get("/devices", items=0)
@@ -1336,7 +1382,7 @@ def pool_members(api: CoreAPI, pool: dict[int, int]) -> list[dict]:
 
     Exit 3 naming each member RCE doesn't know; exit 2 for a Retired Cloud Device.
     """
-    names = device_names_by_id()
+    names = config_names_by_id()
     by_id = {d["id"]: device_summary(d, names.get(d["id"])) for d in api.get("/devices", items=0)}
     if unknown := [str(id) for id in pool if id not in by_id]:
         raise RceError(
@@ -2024,7 +2070,7 @@ def list_row(device: dict) -> list[str]:
 def cmd_device_list(args: argparse.Namespace) -> None:
     if args.pool:
         return list_pool(args)
-    names = device_names_by_id()
+    names = config_names_by_id()
     devices = [device_summary(d, names.get(d["id"])) for d in CoreAPI().get("/devices", items=0)]
     if args.running:
         devices = [d for d in devices if has_run(d)]
@@ -2056,7 +2102,7 @@ def list_pool(args: argparse.Namespace) -> None:
 
 
 def cmd_device_show(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     password = stored_dev_password(ref.name) if args.dev_password else None
     if args.dev_password and not password:  # refused before any API call
         raise RceError(REFUSED, f"no Dev Password is stored for {ref.display}.")
@@ -2079,18 +2125,9 @@ def cmd_device_show(args: argparse.Namespace) -> None:
 
 
 def cmd_device_alias(args: argparse.Namespace) -> None:
-    check_device_name(args.name)
-    device = CoreAPI().get(f"/devices/{resolve_device(args.device).id}")
-    config = load_config()
-    names = config.setdefault("devices", {})
-    holder = names.get(args.name, {}).get("id", device["id"])
-    if holder != device["id"] and not args.force:
-        raise RceError(USAGE, f"{name_taken(args.name, holder)} Pass --force to move it.")
-    # One Device Name per Cloud Device: renaming keeps the fields stored with it.
-    old = next((name for name, entry in names.items() if entry["id"] == device["id"]), None)
-    entry = names.pop(old) if old else {}
-    names[args.name] = {**entry, "id": device["id"], "type": device["device_type"]}
-    save_config(config)
+    config_check_name(args.name)
+    device = CoreAPI().get(f"/devices/{config_resolve(args.device).id}")
+    config_name_device(device["id"], device["device_type"], args.name, args.force)
     emit(
         args,
         {"id": device["id"], "device_name": args.name, "type": device["device_type"]},
@@ -2099,10 +2136,9 @@ def cmd_device_alias(args: argparse.Namespace) -> None:
 
 
 def cmd_device_resolve(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.name)
+    ref = config_resolve(args.name)
     name = require_device_name(ref)
-    entry = device_entry(name)
-    emit(args, {"id": ref.id, "type": entry["type"]}, str(ref.id))
+    emit(args, {"id": ref.id, "type": config_device_type(name)}, str(ref.id))
 
 
 def check_start_flags(args: argparse.Namespace) -> None:
@@ -2137,7 +2173,7 @@ def check_start_flags(args: argparse.Namespace) -> None:
 def cmd_device_start(args: argparse.Namespace) -> None:
     check_start_flags(args)
     pool = read_pool() if args.pool else None
-    ref = None if args.pool else resolve_device(args.device)
+    ref = None if args.pool else config_resolve(args.device)
     api = CoreAPI()
     options = StartOptions(
         args.snapshot, args.firmware, args.max_runtime, not args.no_wait, args.timeout
@@ -2187,7 +2223,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
 
 
 def cmd_device_status(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     report = run_report(get_device(CoreAPI(), ref), ref.name)
     run = report["run"]
     rows = [["Cloud Device:", ref.display], ["Status:", report["status"]]]
@@ -2209,7 +2245,7 @@ def cmd_device_status(args: argparse.Namespace) -> None:
 
 
 def cmd_device_stop(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     name = ref.display
     api = CoreAPI()
     with device_lock(ref, args.wait_lock):
@@ -2231,9 +2267,9 @@ def cmd_device_stop(args: argparse.Namespace) -> None:
 
 
 def cmd_device_create(args: argparse.Namespace) -> None:
-    check_device_name(args.name)
-    if args.name in (names := device_entries()):
-        raise RceError(USAGE, name_taken(args.name, names[args.name]["id"]))
+    config_check_name(args.name)
+    if (holder := config_holder(args.name)) is not None:
+        raise RceError(USAGE, name_taken(args.name, holder))
     api = CoreAPI()
     if not args.yes:
         org = api.get("/user/me")["organisation"]
@@ -2245,9 +2281,7 @@ def cmd_device_create(args: argparse.Namespace) -> None:
             "The new one is permanent, cannot be deleted, and uses quota for good.",
         )
     device = api.request("POST", "/devices", json={"name": args.name, "device_type": args.type})
-    config = load_config()
-    config.setdefault("devices", {})[args.name] = {"id": device["id"], "type": args.type}
-    save_config(config)
+    config_add_name(args.name, device["id"], args.type)
     emit(
         args,
         {"id": device["id"], "device_name": args.name, "type": args.type},
@@ -2259,7 +2293,7 @@ RETIRED_PREFIX = "retired/"
 
 
 def cmd_device_retire(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     api = CoreAPI()
     device = api.get(f"/devices/{ref.id}")
     if device["name"].startswith(RETIRED_PREFIX):
@@ -2281,14 +2315,12 @@ def cmd_device_retire(args: argparse.Namespace) -> None:
     )
     api.request("PATCH", f"/devices/{ref.id}", json={"name": name})
     if ref.name:
-        config = load_config()
-        del config["devices"][ref.name]
-        save_config(config)
+        config_drop_name(ref.name)
     emit(args, {"id": ref.id, "name": name}, f"Retired Cloud Device {ref.id} as {name!r}.")
 
 
 def cmd_device_setup_dev(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     name = require_device_name(ref)
     progress = device_entry(name).get("setup_dev", {"done": []})
     if not args.restart and set(progress["done"]) >= set(SETUP_STEPS):
@@ -2340,7 +2372,7 @@ def cmd_device_setup_dev(args: argparse.Namespace) -> None:
 
 
 def cmd_key(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     send_keys(CoreAPI(), ref, args.keys, args.delay / 1000)
     emit(
         args,
@@ -2375,7 +2407,7 @@ ECP_SUMMARIES = {"query/device-info": device_info, "query/active-app": active_ap
 
 
 def cmd_ecp(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     answer = ecp(CoreAPI(), ref, args.path, args.method)
     summary = ECP_SUMMARIES.get(urlsplit(args.path).path.strip("/"))
     data = summary(answer) if args.json and summary else {"path": args.path, "body": answer}
@@ -2390,7 +2422,7 @@ def launch_param(text: str) -> tuple[str, str]:
 
 
 def cmd_launch(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     ecp(CoreAPI(), ref, "launch/dev", "POST", params=args.params)
     shown = " ".join(f"{key}={value}" for key, value in args.params)
     emit(
@@ -2408,7 +2440,7 @@ def read_file(path: str) -> bytes:
 
 
 def cmd_sideload(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     archive = read_file(args.file)
     name, file = ref.display, Path(args.file).name
     outcome = install_app(Installer.open(CoreAPI(), ref), file, archive)
@@ -2421,7 +2453,7 @@ def cmd_sideload(args: argparse.Namespace) -> None:
 
 
 def cmd_screenshot(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     jpeg = take_screenshot(Installer.open(CoreAPI(), ref))
     path = Path(args.output).absolute()
     try:
@@ -2447,7 +2479,7 @@ MARKS = (("base", "base"), ("live", "live"), ("dev_snapshot", "dev"))  # list's 
 
 
 def cmd_snapshot_list(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     dev = dev_snapshot_id(ref)
     snapshots = [
         snapshot_view(s, dev) for s in CoreAPI().get(f"/devices/{ref.id}/snapshots", items=0)
@@ -2461,7 +2493,7 @@ def cmd_snapshot_list(args: argparse.Namespace) -> None:
 
 
 def cmd_snapshot_take(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     check_snapshot_name(args.snapshot_name)
     confirm(
         args,
@@ -2480,7 +2512,7 @@ def cmd_snapshot_take(args: argparse.Namespace) -> None:
 
 
 def cmd_snapshot_use_as_dev(args: argparse.Namespace) -> None:
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     name = require_device_name(ref)
     snapshot = ready_snapshot(CoreAPI(), ref, args.snapshot)
     old = dev_snapshot_id(ref)
@@ -2507,7 +2539,7 @@ def cmd_console(args: argparse.Namespace) -> None:
         until = re.compile(args.until) if args.until is not None else None
     except re.error as error:
         raise RceError(USAGE, f"--until is not a valid regex: {error}")
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     api = CoreAPI()
     run = current_run(api, ref)
     deadline = None if args.timeout is None else time.monotonic() + args.timeout
@@ -2535,7 +2567,7 @@ def cmd_forward(args: argparse.Namespace) -> None:
         ports = ", ".join(map(str, FORWARD_PORTS))
         raise RceError(USAGE, f"port {args.port} can't be forwarded; RCE bridges {ports}.")
     local = args.port if args.local is None else args.local
-    ref = resolve_device(args.device)
+    ref = config_resolve(args.device)
     api = CoreAPI()
     run = current_run(api, ref)
     api.check_reach(bridge_url(run, args.port))  # before listening, not per connection
@@ -2623,12 +2655,12 @@ def read_forwarded(local: tuple[str, int], marker: str, timeout: float) -> bool:
 def selftest_device(args: argparse.Namespace) -> DeviceRef:
     """--device, or the only Device Name; exit 2 when that is ambiguous."""
     if args.device is not None:
-        return resolve_device(args.device)
-    names = sorted(device_entries())
+        return config_resolve(args.device)
+    names = config_names()
     if len(names) != 1:
         known = f" (Device Names: {', '.join(names)})" if names else ""
         raise RceError(USAGE, f"pick the Cloud Device to test with --device NAME{known}")
-    return resolve_device(names[0])
+    return config_resolve(names[0])
 
 
 def cmd_selftest(args: argparse.Namespace) -> None:
@@ -2671,9 +2703,9 @@ def cmd_selftest(args: argparse.Namespace) -> None:
         if not args.json:
             print(f"ok   {number} {title}: {detail}", flush=True)
 
-    def start() -> str:
-        run = start_run(api, ref, StartOptions(max_runtime=SELFTEST_MAX_RUNTIME))["running_device"]
-        return f"Run {run['id']} of {name} takes input"
+    def start() -> str:  # `run`: the selftest's command_run, below
+        running = run.start(StartOptions(max_runtime=SELFTEST_MAX_RUNTIME))["running_device"]
+        return f"Run {running['id']} of {name} takes input"
 
     def info() -> str:
         found = device_info(ecp(api, ref, "query/device-info"))
@@ -2716,13 +2748,13 @@ def cmd_selftest(args: argparse.Namespace) -> None:
 
     def stop() -> str:
         report = run_report(get_device(api, ref), ref.name)
-        stop_run(api, ref, wait=True)
+        run.stop(wait=True)
         return (
             f"Run {report['run']['id']} ran {report['elapsed_s'] // 60} min, "
             f"about {usd(report['elapsed_cost_usd'])}; {name} is shut down"
         )
 
-    with device_lock(ref, args.wait_lock):
+    with command_run(api, ref, keep=False, adopt=False, wait_lock=args.wait_lock) as run:
         try:
             step("start", start)  # a start that fails stops its own Run
             try:
