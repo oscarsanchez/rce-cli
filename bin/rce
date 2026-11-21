@@ -156,7 +156,8 @@ def load_token() -> tuple[str, str]:
 
 # One TOML file per user, shared by every project. Each Device Name is a table
 # under [devices] holding its Cloud Device's RCE id and type, and what rce
-# stores for that Cloud Device. Only this section knows the layout:
+# stores for that Cloud Device. Only this section loads or saves the file (its `_`
+# names); the rest of rce goes through the `config_` functions. Only it knows the layout:
 #
 #   [devices.player]
 #   id = 351
@@ -174,7 +175,7 @@ def config_path() -> Path:
     return Path(base) / "roku-rce" / "devices.toml"
 
 
-def load_config() -> dict:
+def _load_config() -> dict:
     """The per-user config; empty until the first save."""
     path = config_path()
     try:
@@ -185,7 +186,7 @@ def load_config() -> dict:
         raise RceError(USAGE, f"cannot read {path}: {error}")
 
 
-def save_config(config: dict) -> None:
+def _save_config(config: dict) -> None:
     """Replace the per-user config atomically, mode 0600 from the start."""
     path = config_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -197,14 +198,14 @@ def describe(id: int, name: str | None) -> str:
     return f"{name} ({id})" if name else f"Cloud Device {id}"
 
 
-def device_entries() -> dict:
+def _device_entries() -> dict:
     """The per-user config's tables, one per Device Name."""
-    return load_config().get("devices", {})
+    return _load_config().get("devices", {})
 
 
-def device_entry(name: str) -> dict:
+def _device_entry(name: str) -> dict:
     """What the per-user config stores with a Device Name."""
-    return device_entries()[name]
+    return _device_entries()[name]
 
 
 @dataclass(frozen=True)
@@ -229,23 +230,23 @@ def is_raw_id(text: str) -> bool:
 
 def config_names_by_id() -> dict[int, str]:
     """Each named Cloud Device's Device Name, by RCE id."""
-    return {entry["id"]: name for name, entry in device_entries().items()}
+    return {entry["id"]: name for name, entry in _device_entries().items()}
 
 
 def config_names() -> list[str]:
     """The Device Names in the per-user config, sorted."""
-    return sorted(device_entries())
+    return sorted(_device_entries())
 
 
 def config_holder(name: str) -> int | None:
     """The RCE id of the Cloud Device a Device Name names; None while the name is free."""
-    entry = device_entries().get(name)
+    entry = _device_entries().get(name)
     return entry["id"] if entry else None
 
 
 def config_device_type(name: str) -> str:
     """The device type stored with a Device Name."""
-    return device_entry(name)["type"]
+    return _device_entry(name)["type"]
 
 
 def config_check_name(name: str) -> None:
@@ -262,7 +263,7 @@ def config_name_device(device_id: int, device_type: str, name: str, force: bool)
     """Give a Cloud Device a Device Name. One Device Name per Cloud Device: renaming keeps
     the fields stored with it. Exit 2 when another Cloud Device holds the name, unless
     forced; a forced move drops what was stored for the old holder."""
-    config = load_config()
+    config = _load_config()
     names = config.setdefault("devices", {})
     holder = names.get(name, {}).get("id", device_id)
     if holder != device_id and not force:
@@ -270,21 +271,21 @@ def config_name_device(device_id: int, device_type: str, name: str, force: bool)
     old = next((old for old, entry in names.items() if entry["id"] == device_id), None)
     entry = names.pop(old) if old else {}
     names[name] = {**entry, "id": device_id, "type": device_type}
-    save_config(config)
+    _save_config(config)
 
 
 def config_add_name(name: str, device_id: int, device_type: str) -> None:
     """Record a new Cloud Device under its Device Name."""
-    config = load_config()
+    config = _load_config()
     config.setdefault("devices", {})[name] = {"id": device_id, "type": device_type}
-    save_config(config)
+    _save_config(config)
 
 
 def config_drop_name(name: str) -> None:
     """Drop a Device Name and everything stored with it."""
-    config = load_config()
+    config = _load_config()
     del config["devices"][name]
-    save_config(config)
+    _save_config(config)
 
 
 def config_resolve(ref: str) -> DeviceRef:
@@ -312,42 +313,42 @@ def require_device_name(ref: DeviceRef) -> str:
     return ref.name
 
 
-def stored(ref: DeviceRef) -> dict:
+def _stored(ref: DeviceRef) -> dict:
     """What the per-user config stores with the Cloud Device's Device Name; nothing for a
     Cloud Device with none."""
-    return device_entry(ref.name) if ref.name else {}
+    return _device_entry(ref.name) if ref.name else {}
 
 
-def store(ref: DeviceRef, **fields: object) -> None:
+def _store(ref: DeviceRef, **fields: object) -> None:
     """Change only these fields stored with the Cloud Device's Device Name, in the file as
     it is now; None removes a field. Exit 3 for a Cloud Device with no Device Name."""
     name = require_device_name(ref)
-    config = load_config()
+    config = _load_config()
     entry = config["devices"][name]
     for key, value in fields.items():
         if value is None:
             entry.pop(key, None)
         else:
             entry[key] = value
-    save_config(config)
+    _save_config(config)
 
 
 def config_dev_password(ref: DeviceRef) -> str | None:
     """The Dev Password stored for the Cloud Device (`device setup-dev` generates it), if any."""
-    return stored(ref).get("dev_password")
+    return _stored(ref).get("dev_password")
 
 
 def config_set_dev_password(ref: DeviceRef, password: str) -> None:
-    store(ref, dev_password=password)
+    _store(ref, dev_password=password)
 
 
 def config_dev_snapshot(ref: DeviceRef) -> int | None:
     """The Cloud Device's Dev Snapshot id, if one is recorded; `device start` uses it."""
-    return stored(ref).get("dev_snapshot_id")
+    return _stored(ref).get("dev_snapshot_id")
 
 
 def config_set_dev_snapshot(ref: DeviceRef, snapshot_id: int) -> None:
-    store(ref, dev_snapshot_id=snapshot_id)
+    _store(ref, dev_snapshot_id=snapshot_id)
 
 
 @dataclass
@@ -361,7 +362,7 @@ class SetupProgress:
 
 def config_setup_progress(ref: DeviceRef) -> SetupProgress:
     """`device setup-dev`'s progress on the Cloud Device; none recorded is no step done."""
-    progress = stored(ref).get("setup_dev", {})
+    progress = _stored(ref).get("setup_dev", {})
     return SetupProgress(list(progress.get("done", [])), progress.get("snapshot_id"))
 
 
@@ -369,12 +370,12 @@ def config_set_setup_progress(ref: DeviceRef, progress: SetupProgress) -> None:
     recorded: dict = {"done": progress.done}
     if progress.snapshot_id is not None:
         recorded["snapshot_id"] = progress.snapshot_id
-    store(ref, setup_dev=recorded)
+    _store(ref, setup_dev=recorded)
 
 
 def config_clear_setup_progress(ref: DeviceRef) -> None:
     """Forget `device setup-dev`'s progress; the Dev Password stays."""
-    store(ref, setup_dev=None)
+    _store(ref, setup_dev=None)
 
 
 # -- Core API ------------------------------------------------------------------
