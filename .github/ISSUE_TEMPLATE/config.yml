@@ -1,0 +1,4 @@
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/oscarsanchez/rce-cli/security/advisories/new
+    about: Report it privately. Don't open a public issue for it.
