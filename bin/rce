@@ -789,15 +789,18 @@ def live_snapshot_id(api: CoreAPI, ref: DeviceRef) -> int:
     return live
 
 
-def start_snapshot(api: CoreAPI, snapshot: int | None, ref: DeviceRef) -> int:
+def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
     """--snapshot, else the Dev Snapshot, else the latest live state (with a warning).
+    With `options.latest`, the latest live state straight away.
 
     The latest live state is the Snapshot RCE marks `live` (saved on every
     stop), not the device's `last_snapshot_id`, which is the Snapshot its last
     Run started from and may be the base: starting from that resets it.
     """
-    if snapshot is not None:
-        return snapshot
+    if options.snapshot is not None:
+        return options.snapshot
+    if options.latest:
+        return live_snapshot_id(api, ref)
     dev = dev_snapshot_id(ref)
     if dev is not None:
         return dev
@@ -818,6 +821,8 @@ class StartOptions:
     max_runtime: int = DEFAULT_MAX_RUNTIME
     wait: bool = True  # until the Run takes input; else only until RCE shows the Run
     timeout: float = DEFAULT_START_TIMEOUT
+    # setup-dev's: with no snapshot, the latest live state, even with a Dev Snapshot
+    latest: bool = False
 
 
 class CommandRun:
@@ -860,7 +865,7 @@ class CommandRun:
         if announce:
             announce("start")
         body = {
-            "snapshot_id": start_snapshot(api, options.snapshot, ref),
+            "snapshot_id": start_snapshot(api, options, ref),
             "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
             "max_runtime": options.max_runtime,
         }
@@ -1531,13 +1536,11 @@ def show_dev_password(display: str, name: str | None) -> bool:
 class DevSetup:
     """One run of `device setup-dev`: its steps, the Run they need, and the person it asks."""
 
-    def __init__(self, api: CoreAPI, ref: DeviceRef, args: argparse.Namespace):
-        self.api, self.ref, self.args = api, ref, args
+    def __init__(self, api: CoreAPI, ref: DeviceRef, args: argparse.Namespace, run: CommandRun):
+        self.api, self.ref, self.args, self.run = api, ref, args, run
         self.name = require_device_name(ref)
         self.display = ref.display
         self.progress = device_entry(self.name).get("setup_dev", {"done": []})
-        self.running = False  # a Run is up and takes input
-        self.started = False  # this command started that Run
         self.password_shown = False
 
     @property
@@ -1547,12 +1550,12 @@ class DevSetup:
     def save_progress(self) -> None:
         update_device_entry(self.name, setup_dev=self.progress)
 
-    def run(self) -> None:
+    def run_steps(self) -> None:
         """Every step not done yet, in order, starting a Run when one needs it."""
         for number, step in enumerate(SETUP_STEPS, start=2):
             if step in self.progress["done"]:
                 continue
-            if step in RUN_STEPS and not self.running:
+            if step in RUN_STEPS and not self.run_up:
                 self.start()
             getattr(self, step)(f"Step {number} of 8")
             self.progress["done"].append(step)
@@ -1560,38 +1563,41 @@ class DevSetup:
 
     # -- the Run ----------------------------------------------------------------
 
+    @property
+    def run_up(self) -> bool:
+        """A Run is up and takes input, started here or already going."""
+        return self.run.device is not None
+
     def start(self) -> None:
         """Step 1: a Run from the Cloud Device's latest state, or the one it already has."""
-        if not has_run(get_device(self.api, self.ref)):
-            note(f"Step 1 of 8: starting a Run of {self.display} from its latest state.")
-            options = StartOptions(snapshot=live_snapshot_id(self.api, self.ref))
-            start_run(self.api, self.ref, options)  # it stops the Run if the wait fails
-            self.started = True
-        else:
-            note(f"Step 1 of 8: {self.display} is already running; setup-dev uses that Run.")
-            wait_until_ready(self.api, self.ref, DEFAULT_START_TIMEOUT)
-        self.running = True
+
+        def announce(how: str) -> None:
+            if how == "start":
+                note(f"Step 1 of 8: starting a Run of {self.display} from its latest state.")
+            else:
+                note(f"Step 1 of 8: {self.display} is already running; setup-dev uses that Run.")
+
+        self.run.start(StartOptions(latest=True), announce)
 
     def stop(self) -> bool:
         """Step 8: stop the Run this command started, unless --keep-running. Whether it
         stopped one; a Run that was already going keeps going, with a warning."""
-        if not self.running or self.args.keep_running:
+        if not self.run_up or self.args.keep_running:
             return False
-        if not self.started:
+        if self.run.adopted:
             warn(
                 f"{self.display} was already running when setup-dev began, so it is still "
                 f"running and billing: stop it with `rce device stop {self.name}`."
             )
             return False
-        stop_run(self.api, self.ref)
+        self.run.stop()
         note(f"Step 8 of 8: stopped the Run of {self.display}.")
         return True
 
-    def stop_after_failure(self) -> None:
-        """On a failure or Ctrl-C: stop the Run this command started, or say it is billing."""
-        if self.started and not self.args.keep_running:
-            stop_after_failed_start(self.api, self.ref)
-        elif self.running:
+    def warn_still_billing(self) -> None:
+        """On a failure or Ctrl-C: say a Run that `command_run` leaves going is billing
+        (it stops one this command started, unless --keep-running)."""
+        if self.run_up and (self.run.adopted or self.args.keep_running):
             warn(
                 f"{self.display} is still running and billing. Rerun setup-dev to carry on, "
                 f"or stop it with `rce device stop {self.name}`."
@@ -2310,19 +2316,19 @@ def cmd_device_setup_dev(args: argparse.Namespace) -> None:
     )
     if args.restart:
         update_device_entry(name, setup_dev=None)  # the Dev Password stays: the device may have it
-    setup = DevSetup(api, ref, args)
-    with device_lock(ref, args.wait_lock):
+    with command_run(api, ref, keep=args.keep_running, adopt=True, wait_lock=args.wait_lock) as run:
+        setup = DevSetup(api, ref, args, run)
         try:
-            setup.run()
-        except BaseException:  # a failure or Ctrl-C: the Run must not keep billing
-            setup.stop_after_failure()
+            setup.run_steps()
+        except BaseException:  # a failure or Ctrl-C: command_run stops a Run started here
+            setup.warn_still_billing()
             raise
         stopped = setup.stop()
     setup.show_password()
     snapshot = dev_snapshot_id(ref)
     left = (
         f"Its Run is still going: stop it with `rce device stop {name}`."
-        if setup.running and not stopped
+        if setup.run_up and not stopped
         else f"`rce device start {name}` now starts from it."
     )
     emit(
