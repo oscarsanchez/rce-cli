@@ -81,7 +81,7 @@ Done when:
 
 ## 6. Cursor
 
-Checks the README's Cursor section. Install Cursor's CLI in the sandbox from its install script (read it first; it writes only under `$HOME`) and link `cursor-agent` into `$FI/tools`. Have the maintainer log it in with `cursor-agent login` under the sandbox env (interactive; `AGENT_CLI_CREDENTIAL_STORE=file` keeps it out of the keychain). In `$FI/home/.config/cursor/cli-config.json`, set `permissions.allow` to `["Shell(command)", "Shell(rce)"]`, and move `$FI/home/roku-rce-config.json` aside during each run so no `rce` call can reach RCE. From an empty `$FI/ws`:
+Checks the [Cursor page](../how-to/cursor.md). Install Cursor's CLI in the sandbox from its install script (read it first; it writes only under `$HOME`) and link `cursor-agent` into `$FI/tools`. Have the maintainer log it in with `cursor-agent login` under the sandbox env (interactive; `AGENT_CLI_CREDENTIAL_STORE=file` keeps it out of the keychain). In `$FI/home/.config/cursor/cli-config.json`, set `permissions.allow` to `["Shell(command)", "Shell(rce)"]`, and move `$FI/home/roku-rce-config.json` aside during each run so no `rce` call can reach RCE. From an empty `$FI/ws`:
 
 ```sh
 cursor-agent -p --trust --output-format stream-json 'List every skill available to you whose name or description mentions "rce" or "Roku", with the exact file path it was loaded from. Then run `command -v rce` and `rce --version` and show their output verbatim.'
@@ -89,10 +89,10 @@ cursor-agent -p --trust --output-format stream-json 'List every skill available 
 
 Done when:
 
-- with the plugin installed and no link, the skill is named `rce` (Cursor names it after its folder, so tags before the move to `skills/rce/`, `v0.1.0` included, show `skill`) and its path is inside `$FI/home/.claude/plugins/cache/rce-cli/`; with the link added too, it is listed twice (the README's reason not to link); with the link alone, once;
+- with the plugin installed and no link, the skill is named `rce` (Cursor names it after its folder, so tags before the move to `skills/rce/`, `v0.1.0` included, show `skill`) and its path is inside `$FI/home/.claude/plugins/cache/rce-cli/`; with the link added too, it is listed twice (the Cursor page's reason not to link); with the link alone, once;
 - `command -v rce` is `$FI/home/.local/bin/rce` and `rce --version` prints the tag's version; with `$FI/home/.local/bin` off `PATH`, `command -v rce` exits 1 (the plugin's `rce` is not on Cursor's PATH).
 
-Seen at `v0.1.0`: Cursor's CLI did not run the plugin's Stop hook (a test hook in the sandbox plugin cache that writes a marker never ran), so the README says Cursor has no running-Run warning.
+Seen at `v0.1.0`: Cursor's CLI did not run the plugin's Stop hook (a test hook in the sandbox plugin cache that writes a marker never ran), so the Cursor page says Cursor has no running-Run warning.
 
 ## 7. Clean up
 
