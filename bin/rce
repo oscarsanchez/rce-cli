@@ -208,6 +208,11 @@ def _device_entry(name: str) -> dict:
     return _device_entries()[name]
 
 
+def _new_device_entry(device_id: int, device_type: str) -> dict:
+    """The fields a Device Name's table starts with: its Cloud Device's RCE id and type."""
+    return {"id": device_id, "type": device_type}
+
+
 @dataclass(frozen=True)
 class DeviceRef:
     id: int
@@ -226,6 +231,12 @@ class DeviceRef:
 
 def is_raw_id(text: str) -> bool:
     return re.fullmatch(r"[0-9]+", text) is not None
+
+
+def check_device_name_format(name: str) -> None:
+    """A new Device Name must not read as an RCE id."""
+    if is_raw_id(name):
+        raise RceError(USAGE, f"a Device Name can't be all digits ({name!r}): it reads as an RCE id")
 
 
 def config_names_by_id() -> dict[int, str]:
@@ -249,12 +260,6 @@ def config_device_type(name: str) -> str:
     return _device_entry(name)["type"]
 
 
-def config_check_name(name: str) -> None:
-    """A new Device Name must not read as an RCE id."""
-    if is_raw_id(name):
-        raise RceError(USAGE, f"a Device Name can't be all digits ({name!r}): it reads as an RCE id")
-
-
 def name_taken(name: str, holder: int) -> str:
     return f"Device Name {name!r} already names Cloud Device {holder}."
 
@@ -270,14 +275,14 @@ def config_name_device(device_id: int, device_type: str, name: str, force: bool)
         raise RceError(USAGE, f"{name_taken(name, holder)} Pass --force to move it.")
     old = next((old for old, entry in names.items() if entry["id"] == device_id), None)
     entry = names.pop(old) if old else {}
-    names[name] = {**entry, "id": device_id, "type": device_type}
+    names[name] = {**entry, **_new_device_entry(device_id, device_type)}
     _save_config(config)
 
 
-def config_add_name(name: str, device_id: int, device_type: str) -> None:
+def config_add_name(device_id: int, device_type: str, name: str) -> None:
     """Record a new Cloud Device under its Device Name."""
     config = _load_config()
-    config.setdefault("devices", {})[name] = {"id": device_id, "type": device_type}
+    config.setdefault("devices", {})[name] = _new_device_entry(device_id, device_type)
     _save_config(config)
 
 
@@ -857,9 +862,14 @@ class CommandRun:
     """The Run of one rce command, as `command_run` hands it back."""
 
     def __init__(
-        self, api: CoreAPI, ref: DeviceRef, adopt: bool, leave_unknown_start: bool = False
+        self,
+        api: CoreAPI,
+        ref: DeviceRef,
+        keep: bool,
+        adopt: bool,
+        leave_unknown_start: bool = False,
     ):
-        self.api, self.ref, self.adopt = api, ref, adopt
+        self.api, self.ref, self.keep, self.adopt = api, ref, keep, adopt
         # Leave a start RCE may have taken (`start_unknown`) to the caller: its error is
         # passed on, and neither it nor Ctrl-C before RCE accepted the start looks or stops.
         self.leave_unknown_start = leave_unknown_start
@@ -870,6 +880,17 @@ class CommandRun:
         self.started = False  # RCE accepted this command's start
         self.adopted = False  # the Run was already going, and this command uses it
         self.stop_tried = False  # a stop was asked for, whether or not it worked
+
+    @property
+    def up(self) -> bool:
+        """The Run this command started or adopted is going: no stop was tried. A start
+        RCE accepted counts before its wait returns, so the block's end still stops it."""
+        return (self.started or self.device is not None) and not self.stop_tried
+
+    @property
+    def left_running(self) -> bool:
+        """The Run is up and the block's end leaves it going: adopted, or kept."""
+        return self.up and (self.adopted or self.keep)
 
     def start(self, options: StartOptions, announce=None) -> dict:
         """Adopt the Cloud Device's Run or refuse (exit 4), or ask RCE for one; then wait
@@ -1035,15 +1056,15 @@ def command_run(
     """A Run's whole life inside one rce command, under the device lock.
 
     Entering takes the lock and starts nothing: `start()` gets the Run going and
-    `stop()` ends it. When the block ends, a Run this command started is stopped
-    unless `keep`, or a stop was already tried. `leave_unknown_start`: see `CommandRun`.
+    `stop()` ends it. When the block ends, a Run that is up is stopped unless it is
+    `left_running` (adopted, or `keep`). `leave_unknown_start`: see `CommandRun`.
     """
     with device_lock(ref, wait_lock):
-        run = CommandRun(api, ref, adopt, leave_unknown_start)
+        run = CommandRun(api, ref, keep, adopt, leave_unknown_start)
         try:
             yield run
         finally:
-            if not keep and run.started and not run.stop_tried:
+            if run.up and not run.left_running:
                 run._stop_after_failure()
 
 
@@ -1610,11 +1631,11 @@ def show_dev_password(ref: DeviceRef) -> bool:
 class DevSetup:
     """One run of `device setup-dev`: its steps, the Run they need, and the person it asks."""
 
-    def __init__(self, api: CoreAPI, ref: DeviceRef, args: argparse.Namespace, run: CommandRun):
-        self.api, self.ref, self.args, self.run = api, ref, args, run
-        self.name = ref.arg
-        self.display = ref.display
-        self.progress = config_setup_progress(ref)
+    def __init__(self, args: argparse.Namespace, run: CommandRun):
+        self.api, self.ref, self.args, self.run = run.api, run.ref, args, run
+        self.name = run.ref.arg
+        self.display = run.ref.display
+        self.progress = config_setup_progress(run.ref)
         self.password_shown = False
 
     @property
@@ -1629,18 +1650,13 @@ class DevSetup:
         for number, step in enumerate(SETUP_STEPS, start=2):
             if step in self.progress.done:
                 continue
-            if step in RUN_STEPS and not self.run_up:
+            if step in RUN_STEPS and not self.run.up:
                 self.start()
             getattr(self, step)(f"Step {number} of 8")
             self.progress.done.append(step)
             self.save_progress()
 
     # -- the Run ----------------------------------------------------------------
-
-    @property
-    def run_up(self) -> bool:
-        """A Run is up and takes input, started here or already going."""
-        return self.run.device is not None
 
     def start(self) -> None:
         """Step 1: a Run from the Cloud Device's latest state, or the one it already has."""
@@ -1656,7 +1672,7 @@ class DevSetup:
     def stop(self) -> bool:
         """Step 8: stop the Run this command started, unless --keep-running. Whether it
         stopped one; a Run that was already going keeps going, with a warning."""
-        if not self.run_up or self.args.keep_running:
+        if not self.run.up or self.args.keep_running:
             return False
         if self.run.adopted:
             warn(
@@ -1671,7 +1687,7 @@ class DevSetup:
     def warn_still_billing(self) -> None:
         """On a failure or Ctrl-C: say a Run that `command_run` leaves going is billing
         (it stops one this command started, unless --keep-running)."""
-        if self.run_up and (self.run.adopted or self.args.keep_running):
+        if self.run.left_running:
             warn(
                 f"{self.display} is still running and billing. Rerun setup-dev to carry on, "
                 f"or stop it with `rce device stop {self.name}`."
@@ -2153,7 +2169,7 @@ def cmd_device_show(args: argparse.Namespace) -> None:
 
 
 def cmd_device_alias(args: argparse.Namespace) -> None:
-    config_check_name(args.name)
+    check_device_name_format(args.name)
     device = CoreAPI().get(f"/devices/{config_resolve(args.device).id}")
     config_name_device(device["id"], device["device_type"], args.name, args.force)
     emit(
@@ -2295,7 +2311,7 @@ def cmd_device_stop(args: argparse.Namespace) -> None:
 
 
 def cmd_device_create(args: argparse.Namespace) -> None:
-    config_check_name(args.name)
+    check_device_name_format(args.name)
     if (holder := config_holder(args.name)) is not None:
         raise RceError(USAGE, name_taken(args.name, holder))
     api = CoreAPI()
@@ -2309,7 +2325,7 @@ def cmd_device_create(args: argparse.Namespace) -> None:
             "The new one is permanent, cannot be deleted, and uses quota for good.",
         )
     device = api.request("POST", "/devices", json={"name": args.name, "device_type": args.type})
-    config_add_name(args.name, device["id"], args.type)
+    config_add_name(device["id"], args.type, args.name)
     emit(
         args,
         {"id": device["id"], "device_name": args.name, "type": args.type},
@@ -2376,7 +2392,7 @@ def cmd_device_setup_dev(args: argparse.Namespace) -> None:
     if args.restart:
         config_clear_setup_progress(ref)  # the Dev Password stays: the device may have it
     with command_run(api, ref, keep=args.keep_running, adopt=True, wait_lock=args.wait_lock) as run:
-        setup = DevSetup(api, ref, args, run)
+        setup = DevSetup(args, run)
         try:
             setup.run_steps()
         except BaseException:  # a failure or Ctrl-C: command_run stops a Run started here
@@ -2387,7 +2403,7 @@ def cmd_device_setup_dev(args: argparse.Namespace) -> None:
     snapshot = config_dev_snapshot(ref)
     left = (
         f"Its Run is still going: stop it with `rce device stop {name}`."
-        if setup.run_up and not stopped
+        if run.up
         else f"`rce device start {name}` now starts from it."
     )
     emit(
@@ -2753,8 +2769,8 @@ def cmd_selftest(args: argparse.Namespace) -> None:
 
     def console() -> str:
         deadline = time.monotonic() + SELFTEST_STEP_TIMEOUT
-        run = current_run(api, ref)
-        if not any(marker in line for line in console_lines(api, ref, run, deadline)):
+        current = current_run(api, ref)
+        if not any(marker in line for line in console_lines(api, ref, current, deadline)):
             raise RceError(TIMEOUT, f"the console showed no {marker} in {SELFTEST_STEP_TIMEOUT} s")
         return f"read {marker} on port {CONSOLE_PORT}"
 
@@ -2762,9 +2778,9 @@ def cmd_selftest(args: argparse.Namespace) -> None:
         return f"{len(take_screenshot(Installer.open(api, ref)))} bytes"
 
     def forward() -> str:
-        run = current_run(api, ref)
+        current = current_run(api, ref)
         with socket.create_server(("127.0.0.1", 0)) as server:
-            start_forwarding(api, ref, run, CONSOLE_PORT, server)
+            start_forwarding(api, ref, current, CONSOLE_PORT, server)
             local = server.getsockname()
             if not read_forwarded(local, marker, SELFTEST_STEP_TIMEOUT):
                 raise RceError(
