@@ -883,8 +883,9 @@ class CommandRun:
 
     @property
     def up(self) -> bool:
-        """The Run this command started or adopted is going: no stop was tried."""
-        return self.device is not None and not self.stop_tried
+        """The Run this command started or adopted is going: no stop was tried. A start
+        RCE accepted counts before its wait returns, so the block's end still stops it."""
+        return (self.started or self.device is not None) and not self.stop_tried
 
     @property
     def left_running(self) -> bool:
