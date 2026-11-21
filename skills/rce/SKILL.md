@@ -5,7 +5,7 @@ description: Use for Roku Cloud Emulator (RCE) and Cloud Device work through the
 
 # rce: Roku Cloud Emulator from the terminal
 
-`rce` drives RCE from any directory. Every flag: `rce <command> --help`. Every `--json` shape and the full behaviour of each command: [README.md](README.md).
+`rce` drives RCE from any directory. Every flag: `rce <command> --help`. Every `--json` shape and the full behaviour of each command: [reference/commands.md](reference/commands.md). Every exit code in full: [reference/exit-codes.md](reference/exit-codes.md). Environment variables: [reference/environment.md](reference/environment.md).
 
 ## Money and permanence
 
@@ -51,6 +51,8 @@ Ask-first (rule 1): `device create <name> --type tv|stb`, `device retire`, `devi
 `--json` prints JSON on stdout; errors go to stderr as `rce: <message>`.
 
 ## Exit codes
+
+The summary; the full contract is [reference/exit-codes.md](reference/exit-codes.md).
 
 | Code | Meaning | Usual next move |
 |---|---|---|

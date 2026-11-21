@@ -4,6 +4,10 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+
+- The reference moved out of the README: every command's behaviour and `--json` shape is in `docs/reference/commands.md`, the exit codes in `docs/reference/exit-codes.md` and the environment variables in `docs/reference/environment.md`. The README links them from its Docs list, and the `rce` skill links only these pages instead of the whole README. Links to the README's old anchors for these sections (`#exit-codes`, `#environment`, `#runs` and the others) no longer resolve.
+
 ## [0.2.1] - 2026-11-19
 
 ### Fixed

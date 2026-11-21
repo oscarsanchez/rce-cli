@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["httpx>=0.27,<1", "tomli-w>=1,<2", "websockets>=15,<16"]
 # ///
-"""rce: a command-line client for Roku Cloud Emulator (RCE). See README.md."""
+"""rce: a command-line client for Roku Cloud Emulator (RCE). See README.md and docs/reference/."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from websockets.sync.client import connect as ws_connect
 
 VERSION = "0.2.1"  # the one source of truth; the plugin manifest repeats it, a test checks
 
-# Exit codes: a public contract, documented in README.md.
+# Exit codes: a public contract, documented in docs/reference/exit-codes.md.
 OK, ERROR, USAGE, NOT_FOUND, REFUSED, TIMEOUT = 0, 1, 2, 3, 4, 5
 INTERRUPTED = 130  # Ctrl-C, as shells report SIGINT
 
