@@ -4,6 +4,8 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-21
+
 ### Added
 
 - A bug report form for new issues. It asks for `rce --version`, the OS, the install, the command and its exit code, and first warns never to paste an RCE token, a Dev Password or `rce`'s config files. The new-issue page also links private vulnerability reporting.
@@ -15,6 +17,7 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 - The Cursor setup and the Claude Code settings moved from the README to their own pages, [docs/how-to/cursor.md](docs/how-to/cursor.md) and [docs/how-to/claude-code-settings.md](docs/how-to/claude-code-settings.md), both listed in the README's new Docs list; the README's `#claude-code-settings` anchor is gone.
 - The reference moved out of the README: every command's behaviour and `--json` shape is in `docs/reference/commands.md`, the exit codes, each with its usual next move, in `docs/reference/exit-codes.md` and the environment variables in `docs/reference/environment.md`. The README links them from its Docs list, and the `rce` skill links only these pages instead of the whole README. Links to the README's old anchors for these sections no longer resolve: `#token`, `#commands`, `#device-names`, `#token-status---json`, `#device-list---json`, `#device-show---json`, `#device-alias---json`, `#device-retire---json`, `#runs`, `#claiming-from-a-pool`, `#device-lock`, `#device-start-stop-and-status---json`, `#usage---json`, `#using-a-running-cloud-device`, `#key---json`, `#ecp---json`, `#launch---json`, `#sideload-and-screenshot`, `#sideload---json`, `#screenshot---json`, `#snapshots`, `#snapshot-list---json`, `#snapshot-use-as-dev---json`, `#dev-setup`, `#device-setup-dev---json`, `#console`, `#forward`, `#selftest`, `#exit-codes` and `#environment`. <!-- glossary-ok: an old README heading's slug -->
 - The development notes (the check, the lints and the Seam A tests) moved from the README to [docs/development.md](docs/development.md); the README's `#development` and `#tests-seam-a` anchors are gone.
+- The pipeline recipes download `rce` at `v0.2.2`.
 
 ## [0.2.1] - 2026-11-19
 
@@ -80,7 +83,8 @@ If you keep the CLI install too, pull and run `./install.sh` again: `rce` moved 
 - `rce`, a command-line client for Roku® Cloud Emulator, and a Claude Code plugin whose skill teaches Claude to use it. From any directory and any Roku project, it lists, starts and stops Cloud Devices, sideloads, reads the BrightScript console, sends ECP commands and remote keys, takes screenshots, forwards debugger ports, sets up developer mode with a Dev Snapshot, and creates and retires Cloud Devices. It needs only uv, on macOS or Linux, and your own RCE token.
 - Three installs: the Claude Code plugin (the skill, the Stop hook that warns about a Run still billing, and `rce` on Claude's PATH), the terminal install (clone and `./install.sh`), and, for pipelines, the single `bin/rce` script downloaded at a release tag.
 
-[Unreleased]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/oscarsanchez/rce-cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/oscarsanchez/rce-cli/compare/v0.1.0-rc.1...v0.1.0
