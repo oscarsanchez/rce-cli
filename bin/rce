@@ -822,7 +822,7 @@ def default_firmware(firmware: list[dict]) -> dict:
     return max(firmware, key=version)
 
 
-def latest_firmware(api: CoreAPI, device_type: str) -> str:
+def default_firmware_id(api: CoreAPI, device_type: str) -> str:
     """The id of the default Firmware for a device type."""
     firmware = api.get("/firmwareVersions", device_type=device_type, items=0)
     if not firmware:
@@ -870,7 +870,7 @@ class StartOptions:
     """How to start a Run: `device start`'s flags, and their defaults."""
 
     snapshot: int | None = None  # None: the Dev Snapshot, else the Live Snapshot
-    firmware: str | None = None  # None: the latest for the device type
+    firmware: str | None = None  # None: the default Firmware for the device type
     max_runtime: int = DEFAULT_MAX_RUNTIME
     wait: bool = True  # until the Run takes input; else only until RCE shows the Run
     timeout: float = DEFAULT_START_TIMEOUT
@@ -935,7 +935,7 @@ class CommandRun:
             announce("start")
         body = {
             "snapshot_id": start_snapshot(api, options, ref),
-            "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
+            "firmware_version_id": options.firmware or default_firmware_id(api, device["device_type"]),
             "max_runtime": options.max_runtime,
         }
         try:
@@ -2307,15 +2307,26 @@ def cmd_firmware_list(args: argparse.Namespace) -> None:
     only = {"device_type": args.type} if args.type else {}
     firmware = CoreAPI().get("/firmwareVersions", **only, items=0)
     types = {f["device_type"] for f in firmware}
-    defaults = [default_firmware([f for f in firmware if f["device_type"] == t]) for t in types]
+    defaults = {
+        default_firmware([f for f in firmware if f["device_type"] == t])["firmware_version_id"]
+        for t in types
+    }
     listed = [
-        {key: f[key] for key in ("firmware_version_id", "device_type", "display_name")}
-        | {"default": f in defaults}
+        {
+            "firmware_version_id": f["firmware_version_id"],
+            "device_type": f["device_type"],
+            "display_name": f["display_name"],
+            "default": f["firmware_version_id"] in defaults,
+        }
         for f in firmware
     ]
     rows = [["ID", "TYPE", "DISPLAY NAME", "DEFAULT"]] + [
-        [f["firmware_version_id"], f["device_type"], f["display_name"] or "-"]
-        + ["default" if f["default"] else "-"]
+        [
+            f["firmware_version_id"],
+            f["device_type"],
+            f["display_name"] or "-",
+            "default" if f["default"] else "-",
+        ]
         for f in listed
     ]
     if listed or args.json:  # no Firmware: no table, not even its header
