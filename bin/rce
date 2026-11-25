@@ -825,24 +825,24 @@ def latest_firmware(api: CoreAPI, device_type: str) -> str:
 
 
 def live_snapshot_id(api: CoreAPI, ref: DeviceRef) -> int:
-    """The Snapshot RCE marks `live`: the Cloud Device's latest state, saved on every stop."""
+    """The Cloud Device's Live Snapshot (RCE marks it `live`): its state, saved at every stop."""
     snapshots = api.get(f"/devices/{ref.id}/snapshots", items=0)
     live = next((s["id"] for s in snapshots if s.get("live")), None)
     if live is None:
         raise RceError(
             NOT_FOUND,
-            f"{ref.display} has no live Snapshot. Pick one with --snapshot.",
+            f"{ref.display} has no Live Snapshot. Pick one with --snapshot.",
         )
     return live
 
 
 def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
-    """--snapshot, else the Dev Snapshot, else the latest live state (with a warning).
-    With `options.latest`, the latest live state straight away.
+    """--snapshot, else the Dev Snapshot, else the Live Snapshot (with a warning).
+    With `options.latest`, the Live Snapshot straight away.
 
-    The latest live state is the Snapshot RCE marks `live` (saved on every
-    stop), not the device's `last_snapshot_id`, which is the Snapshot its last
-    Run started from and may be the base: starting from that resets it.
+    The Live Snapshot is the one RCE marks `live` (saved at every stop), not the
+    device's `last_snapshot_id`, which is the Snapshot its last Run started from
+    and may be the Base Snapshot: starting from that resets it.
     """
     if options.snapshot is not None:
         return options.snapshot
@@ -853,8 +853,8 @@ def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
         return dev
     live = live_snapshot_id(api, ref)
     warn(
-        f"{ref.display} has no Dev Snapshot; starting from its latest live "
-        f"state (Snapshot {live}). It may not be in developer mode."
+        f"{ref.display} has no Dev Snapshot; starting from its Live Snapshot {live}. "
+        "It may not be in developer mode."
     )
     return live
 
@@ -863,12 +863,12 @@ def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
 class StartOptions:
     """How to start a Run: `device start`'s flags, and their defaults."""
 
-    snapshot: int | None = None  # None: the Dev Snapshot, else the latest live state
+    snapshot: int | None = None  # None: the Dev Snapshot, else the Live Snapshot
     firmware: str | None = None  # None: the latest for the device type
     max_runtime: int = DEFAULT_MAX_RUNTIME
     wait: bool = True  # until the Run takes input; else only until RCE shows the Run
     timeout: float = DEFAULT_START_TIMEOUT
-    # setup-dev's: with no snapshot, the latest live state, even with a Dev Snapshot
+    # setup-dev's: with no snapshot, the Live Snapshot, even with a Dev Snapshot
     latest: bool = False
 
 
@@ -1323,7 +1323,7 @@ def take_screenshot(installer: Installer) -> bytes:
 
 def snapshot_view(snapshot: dict, dev_id: int | None) -> dict:
     """What rce shows of a SnapshotOut, and whether it is the Dev Snapshot."""
-    keys = ("id", "name", "created_at", "ready", "base", "live")
+    keys = ("id", "name", "created_at", "firmware_version_display_name", "ready", "base", "live")
     return {key: snapshot[key] for key in keys} | {"dev_snapshot": snapshot["id"] == dev_id}
 
 
@@ -2559,8 +2559,14 @@ def cmd_snapshot_list(args: argparse.Namespace) -> None:
     snapshots = [
         snapshot_view(s, dev) for s in CoreAPI().get(f"/devices/{ref.id}/snapshots", items=0)
     ]
-    rows = [["ID", "NAME", "CREATED", "READY", "BASE", "LIVE", "DEV"]] + [
-        [str(s["id"]), s["name"], s["created_at"], "yes" if s["ready"] else "no"]
+    rows = [["ID", "NAME", "CREATED", "FIRMWARE", "READY", "BASE", "LIVE", "DEV"]] + [
+        [
+            str(s["id"]),
+            s["name"],
+            s["created_at"],
+            s["firmware_version_display_name"] or "-",
+            "yes" if s["ready"] else "no",
+        ]
         + [word if s[key] else "-" for key, word in MARKS]
         for s in snapshots
     ]
@@ -2914,7 +2920,9 @@ def parser() -> argparse.ArgumentParser:
         metavar="S",
         help="with --pool: look again about every 15 s until a member is free, for up to S s",
     )
-    start.add_argument("--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot)")
+    start.add_argument(
+        "--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot, else the Live Snapshot)"
+    )
     start.add_argument("--firmware", help="firmware version id (default: the latest)")
     start.add_argument(
         "--max-runtime", type=int, default=DEFAULT_MAX_RUNTIME, help="cap in seconds"
