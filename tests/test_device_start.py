@@ -123,6 +123,42 @@ def test_start_prints_cost_and_auto_stop_for_people_without_secrets(rce, fake_rc
         assert secret not in result.stdout + result.stderr
 
 
+def test_start_json_names_the_runs_firmware_next_to_its_id(rce, fake_rce):
+    player(rce, fake_rce)
+
+    run = rce.json("device", "start", "player", "--firmware", "304")["run"]
+
+    assert run["firmware_version_id"] == "304"
+    assert run["firmware_version_display_name"] == "v15.3.4 b872"
+
+
+def start_rows(result) -> dict[str, str]:
+    """The lines under `device start`'s human report, as {heading: value}."""
+    assert result.returncode == 0, result.stderr
+    return {k: v.strip() for k, v in (line.split(":", 1) for line in result.stdout.splitlines()[1:])}
+
+
+def test_start_for_people_names_the_firmware_and_the_live_snapshot_without_a_dev_snapshot(
+    rce, fake_rce
+):
+    player(rce, fake_rce)
+
+    result = rce.run("device", "start", "player")
+
+    assert start_rows(result) == {"Firmware": "v16.0.4 b853", "Snapshot": "998 (Live snapshot)"}
+    assert "no Dev Snapshot" in result.stderr
+
+
+def test_start_for_people_names_the_dev_snapshot_it_started_from(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.add_snapshot(351, 1001)
+    record_dev_snapshot(rce, "player", 1001)
+
+    result = rce.run("device", "start", "player", "--firmware", "304")
+
+    assert start_rows(result) == {"Firmware": "v15.3.4 b872", "Snapshot": "1001 (Dev snapshot)"}
+
+
 def test_start_json_never_includes_run_credentials(rce, fake_rce):
     player(rce, fake_rce)
 

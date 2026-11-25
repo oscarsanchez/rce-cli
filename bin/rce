@@ -537,15 +537,29 @@ RUN_FIELDS = (
 )
 
 
-def device_summary(device: dict, device_name: str | None) -> dict:
+def run_info(device: dict) -> dict | None:
+    """The Cloud Device's Run as rce shows it, or None without one.
+
+    RCE's Run has no Firmware display name; the Cloud Device has its latest Run's,
+    so it counts only when the device's Firmware id is the Run's.
+    """
     run = device.get("running_device")
+    if not run:
+        return None
+    same = device.get("firmware_version_id") == run.get("firmware_version_id")
+    return {key: run.get(key) for key in RUN_FIELDS} | {
+        "firmware_version_display_name": device.get("firmware_version_display_name") if same else None
+    }
+
+
+def device_summary(device: dict, device_name: str | None) -> dict:
     return {
         "id": device["id"],
         "device_name": device_name,
         "name": device["name"],
         "type": device["device_type"],
         "status": device["status"],
-        "run": {key: run.get(key) for key in RUN_FIELDS} if run else None,
+        "run": run_info(device),
     }
 
 
@@ -2102,18 +2116,34 @@ def cmd_token_status(args: argparse.Namespace) -> None:
     emit(args, status, table(rows))
 
 
-LIST_HEADER = ["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN"]
+LIST_HEADER = ["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN", "FIRMWARE"]
+
+
+def shown_firmware(run: dict) -> str:
+    """The Firmware a Run is on, by display name, else by id."""
+    return run["firmware_version_display_name"] or run["firmware_version_id"]
+
+
+def firmware_and_snapshot_rows(run: dict) -> list[list[str]]:
+    """The Firmware a Run is on (by name, else id) and the Snapshot it started from."""
+    snapshot, name = str(run["snapshot_id"]), run["snapshot_name"]
+    return [
+        ["Firmware:", shown_firmware(run)],
+        ["Snapshot:", f"{snapshot} ({name})" if name else snapshot],
+    ]
 
 
 def list_row(device: dict) -> list[str]:
     """A `device_summary` as a row of the `device list` table."""
+    run = device["run"]
     return [
         str(device["id"]),
         device["device_name"] or "-",
         device["name"],
         device["type"],
         device["status"],
-        f"since {device['run']['created_at']}" if device["run"] else "-",
+        f"since {run['created_at']}" if run else "-",
+        shown_firmware(run) if run else "-",
     ]
 
 
@@ -2243,7 +2273,8 @@ def cmd_device_start(args: argparse.Namespace) -> None:
         f"{claimed}{ref.display} {state}: Run {report['run']['id']}, "
         f"{usd(report['hourly_cost_usd'])}/h, "
         f"auto-stops around {local_time(parse_time(report['auto_stop_at']))}. "
-        f"Stop it with `rce device stop {ref.arg}`.",
+        f"Stop it with `rce device stop {ref.arg}`.\n"
+        + table(firmware_and_snapshot_rows(report["run"])),
     )
 
 
@@ -2300,6 +2331,7 @@ def cmd_device_status(args: argparse.Namespace) -> None:
         created, auto_stop = parse_time(run["created_at"]), parse_time(report["auto_stop_at"])
         rows += [
             ["Run:", str(run["id"])],
+            *firmware_and_snapshot_rows(run),
             ["Run started:", f"{iso(created)} ({local_time(created)} local)"],
             ["Cap:", f"{run['max_runtime'] // 60} min, auto-stops around {local_time(auto_stop)}"],
             [

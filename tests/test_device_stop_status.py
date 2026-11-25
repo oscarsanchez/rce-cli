@@ -101,6 +101,15 @@ def test_status_of_a_run_shows_state_start_cap_elapsed_time_and_cost(rce, fake_r
     assert datetime.fromisoformat(status["auto_stop_at"]) == started + timedelta(hours=1)
 
 
+@pytest.mark.parametrize("command", ["status", "stop"])
+def test_status_and_stop_json_name_the_runs_firmware(rce, fake_rce, command):
+    running_player(rce, fake_rce)
+
+    run = rce.json("device", command, "player")["run"]
+
+    assert (run["firmware_version_id"], run["firmware_version_display_name"]) == ("395", "v16.0.4 b853")
+
+
 def test_status_for_people_shows_the_run_without_secrets(rce, fake_rce):
     running_player(rce, fake_rce, minutes_ago=10)
 
@@ -114,6 +123,36 @@ def test_status_for_people_shows_the_run_without_secrets(rce, fake_rce):
     assert "$0.03" in result.stdout
     for secret in (*WEBRTC_SECRETS, TOKEN):
         assert secret not in result.stdout + result.stderr
+
+
+def status_rows(rce) -> dict[str, str]:
+    """`device status`'s human output as {heading: value}."""
+    result = rce.run("device", "status", "player")
+    assert result.returncode == 0, result.stderr
+    return {k: v.strip() for k, v in (line.split(":", 1) for line in result.stdout.splitlines())}
+
+
+def test_status_for_people_names_the_runs_firmware_and_snapshot(rce, fake_rce):
+    running_player(rce, fake_rce)
+    before = len(fake_rce.requests)
+
+    rows = status_rows(rce)
+
+    assert rows["Firmware"] == "v16.0.4 b853"
+    assert rows["Snapshot"] == "998 (Live snapshot)"
+    sent = fake_rce.requests[before:]
+    assert [(r.method, r.path) for r in sent] == [("GET", "/api/v1/devices/351")]
+
+
+def test_status_for_people_falls_back_to_the_firmware_id_without_a_name(rce, fake_rce):
+    device = running_player(rce, fake_rce)
+    device["firmware_version_id"] = "304"  # the Cloud Device's Firmware isn't the Run's
+    device["running_device"]["snapshot_name"] = None
+
+    rows = status_rows(rce)
+
+    assert rows["Firmware"] == "395"
+    assert rows["Snapshot"] == "998"
 
 
 def test_status_of_a_device_without_a_run(rce, fake_rce):
