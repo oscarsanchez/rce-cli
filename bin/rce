@@ -865,6 +865,26 @@ def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
     return live
 
 
+def warn_if_other_firmware(api: CoreAPI, ref: DeviceRef, snapshot_id: int, firmware_id: str) -> None:
+    """Warn when a Run gets another Firmware than its Snapshot was saved on: there a Dev
+    Snapshot's dev app may not launch (live check, 2026-11-26). Advisory: a failed read
+    of the Snapshot skips it, and the start goes on either way."""
+    try:
+        snapshot = api.get(f"/devices/{ref.id}/snapshots/{snapshot_id}")
+    except RceError:
+        return
+    saved_on = snapshot.get("firmware_version_id")
+    if saved_on is None or saved_on == firmware_id:
+        return
+    name = f" ({snapshot['name']})" if snapshot.get("name") else ""
+    shown = snapshot.get("firmware_version_display_name")
+    warn(
+        f"Snapshot {snapshot_id}{name} was saved on Firmware "
+        f"{f'{shown} ({saved_on})' if shown else saved_on}, not {firmware_id}: "
+        f"the dev app may not launch. Start with --firmware {saved_on} to match it."
+    )
+
+
 @dataclass(frozen=True)
 class StartOptions:
     """How to start a Run: `device start`'s flags, and their defaults."""
@@ -938,6 +958,7 @@ class CommandRun:
             "firmware_version_id": options.firmware or default_firmware_id(api, device["device_type"]),
             "max_runtime": options.max_runtime,
         }
+        warn_if_other_firmware(api, ref, body["snapshot_id"], body["firmware_version_id"])
         try:
             self.start_unknown = True
             try:
