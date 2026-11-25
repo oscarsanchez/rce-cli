@@ -45,14 +45,14 @@ def test_start_defaults_to_an_hour_the_latest_firmware_and_the_live_state(rce, f
     assert start.json() == {"snapshot_id": 998, "firmware_version_id": "395", "max_runtime": 3600}
 
 
-def test_start_without_a_dev_snapshot_warns_that_it_uses_the_live_state(rce, fake_rce):
+def test_start_without_a_dev_snapshot_warns_that_it_uses_the_live_snapshot(rce, fake_rce):
     player(rce, fake_rce)
 
     result = rce.run("device", "start", "player")
 
     assert result.returncode == 0, result.stderr
     assert "no Dev Snapshot" in result.stderr
-    assert "998" in result.stderr
+    assert "Live Snapshot 998" in result.stderr
 
 
 def test_start_uses_the_dev_snapshot_when_one_is_recorded(rce, fake_rce):

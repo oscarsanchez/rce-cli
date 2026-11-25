@@ -21,8 +21,9 @@ A Run bills **$0.20 per hour**, by the minute, from the moment the start is requ
 - **Cloud Device**: a virtual Roku player (`stb`) or TV (`tv`) on RCE. Permanent; RCE can't delete it, so `retire` renames it and drops its Device Name.
 - **Device Name**: the local name for a Cloud Device. Every command takes a Device Name or a raw RCE id; `rce device list` shows both, `rce device resolve <name>` prints the id.
 - **Run**: one start-to-stop period, with its own address. `rce device start <device>` waits until it takes input (about 80 s) and prints the cost and auto-stop time; `--max-runtime S` sets a shorter cap.
-- **Snapshot**: saved state a Run starts from. RCE keeps `base` (factory) and `live` (saved at every stop).
+- **Snapshot**: saved state a Run starts from. RCE keeps a Base Snapshot (factory state) and a Live Snapshot (saved at every stop).
 - **Dev Snapshot**: the Snapshot `start` uses by default, taken after `setup-dev` turned on developer mode with a generated Dev Password and enabled "Control by mobile apps". `start` warns when a Cloud Device has none. Without it, only `key` works; `ecp`, `launch`, `sideload`, `screenshot`, `console` and `forward` need it.
+- **Choosing a Snapshot**: start from the Dev Snapshot (the default) unless the user asks otherwise. The Live Snapshot (`--snapshot <id>`, the `live` row of `snapshot list`) carries on from the last Run, with its installed dev app, registry and sign-ins; use it only to continue on purpose. The Base Snapshot is factory state, not in developer mode: don't start from it (`setup-dev` is the way from factory state to a Dev Snapshot). Changing the linked account on one Snapshot affects the others. More: [reference/commands.md](reference/commands.md#choosing-a-snapshot).
 
 To watch a Run live, open the Cloud Device in the RCE web console.
 

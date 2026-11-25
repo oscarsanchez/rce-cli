@@ -7,6 +7,11 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 ### Added
 
 - `rce snapshot list` shows the Firmware each Snapshot was saved on, in a new FIRMWARE column (`-` when RCE gives none). Its `--json`, and `snapshot take --json`, add `firmware_version_display_name` to each Snapshot.
+- "Choosing a Snapshot" in the reference's Snapshots section, with a short version in the `rce` skill: start from the Dev Snapshot, from the Live Snapshot only to carry on from the last Run, and never from the Base Snapshot.
+
+### Changed
+
+- The docs, the `rce` skill, `device start --help` and `rce`'s messages name the Base Snapshot and the Live Snapshot. `device start`'s warning when a Cloud Device has no Dev Snapshot now reads "starting from its Live Snapshot <id>". The `BASE` and `LIVE` columns and the `base` and `live` JSON keys are unchanged.
 
 ## [0.2.3] - 2026-11-22
 
