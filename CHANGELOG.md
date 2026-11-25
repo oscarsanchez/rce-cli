@@ -4,6 +4,10 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+
+- `rce snapshot list` shows the Firmware each Snapshot was saved on, in a new FIRMWARE column (`-` when RCE gives none). Its `--json`, and `snapshot take --json`, add `firmware_version_display_name` to each Snapshot.
+
 ## [0.2.3] - 2026-11-22
 
 ### Fixed

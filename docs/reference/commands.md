@@ -291,6 +291,7 @@ A list of:
   "id": 1001,
   "name": "dev-ready",
   "created_at": "2026-11-16T21:30:00Z",
+  "firmware_version_display_name": "v16.0.4 b853",
   "ready": true,
   "base": false,
   "live": false,
@@ -298,7 +299,7 @@ A list of:
 }
 ```
 
-`ready` is false while RCE is still saving it; a Run can't start from it until then. `dev_snapshot` marks the Dev Snapshot.
+`firmware_version_display_name` is the Firmware the Snapshot was saved on, `null` when RCE gives none (as for the Base Snapshot). The human table shows it in the FIRMWARE column, `-` when null. `ready` is false while RCE is still saving it; a Run can't start from it until then. `dev_snapshot` marks the Dev Snapshot.
 
 `snapshot take --json` prints the same object for the new Snapshot, once ready.
 

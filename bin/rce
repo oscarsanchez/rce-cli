@@ -1309,7 +1309,7 @@ def take_screenshot(installer: Installer) -> bytes:
 
 def snapshot_view(snapshot: dict, dev_id: int | None) -> dict:
     """What rce shows of a SnapshotOut, and whether it is the Dev Snapshot."""
-    keys = ("id", "name", "created_at", "ready", "base", "live")
+    keys = ("id", "name", "created_at", "firmware_version_display_name", "ready", "base", "live")
     return {key: snapshot[key] for key in keys} | {"dev_snapshot": snapshot["id"] == dev_id}
 
 
@@ -2527,8 +2527,14 @@ def cmd_snapshot_list(args: argparse.Namespace) -> None:
     snapshots = [
         snapshot_view(s, dev) for s in CoreAPI().get(f"/devices/{ref.id}/snapshots", items=0)
     ]
-    rows = [["ID", "NAME", "CREATED", "READY", "BASE", "LIVE", "DEV"]] + [
-        [str(s["id"]), s["name"], s["created_at"], "yes" if s["ready"] else "no"]
+    rows = [["ID", "NAME", "CREATED", "FIRMWARE", "READY", "BASE", "LIVE", "DEV"]] + [
+        [
+            str(s["id"]),
+            s["name"],
+            s["created_at"],
+            s["firmware_version_display_name"] or "-",
+            "yes" if s["ready"] else "no",
+        ]
         + [word if s[key] else "-" for key, word in MARKS]
         for s in snapshots
     ]
