@@ -3,6 +3,7 @@
 
 The Cloud Device is the Device Name in RCE_AGENT_DEVICE: unset, nothing calls `rce`.
 OWNER becomes RCE_LOCK_OWNER. --max-runtime is 600 s (the default) or less.
+--firmware ID is passed on to `rce device start` (default: its default Firmware).
 While `rce device list --running` isn't empty it looks again every 60 s, and after
 20 min gives up having started nothing. It starts the Cloud Device from its Dev
 Snapshot; a failed start starts nothing more. The command runs with RCE_DEVICE and
@@ -137,10 +138,11 @@ def stop(device: str, run: int, env: dict) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="scripts/live-run", usage="scripts/live-run OWNER [--max-runtime N] -- command [args...]"
+        prog="scripts/live-run", usage="scripts/live-run OWNER [--max-runtime N] [--firmware ID] -- command [args...]"
     )
     parser.add_argument("owner")
     parser.add_argument("--max-runtime", type=int, default=MAX_RUNTIME)
+    parser.add_argument("--firmware")
     parser.add_argument("command", nargs="+")
     args = parser.parse_args()
     if not 0 < args.max_runtime <= MAX_RUNTIME:
@@ -159,8 +161,10 @@ def main() -> int:
     code = 0
     stopped = True
     try:
+        firmware = ["--firmware", args.firmware] if args.firmware else []
         status, out = call(
-            RCE, "device", "start", device, "--max-runtime", str(args.max_runtime), "--json", env=env
+            RCE, "device", "start", device, "--max-runtime", str(args.max_runtime), *firmware, "--json",
+            env=env,
         )
         if status:
             say(f"the start failed (exit {status}): starting nothing more.")

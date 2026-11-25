@@ -84,6 +84,18 @@ def test_the_command_runs_on_a_capped_run_from_the_dev_snapshot_which_is_then_st
     assert rce.json("device", "list", "--running") == []
 
 
+def test_firmware_is_passed_on_to_the_start(rce, fake_rce):
+    agents_device(rce, fake_rce)
+
+    result = live_run(rce, "ticket-04", "--firmware", "304", "--", "true")
+
+    assert result.returncode == 0, result.stderr
+    [start] = fake_rce.requests_to("POST", START)
+    assert start.json()["firmware_version_id"] == "304"
+    assert start.json()["snapshot_id"] == 1001
+    assert len(fake_rce.requests_to("POST", STOP)) == 1
+
+
 def test_a_failing_command_still_stops_the_run_and_its_status_is_passed_on(rce, fake_rce):
     agents_device(rce, fake_rce)
 
