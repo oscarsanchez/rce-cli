@@ -22,6 +22,7 @@ def test_list_shows_each_snapshot_and_marks_none_as_dev_without_one(rce, fake_rc
             "id": 997,
             "name": "Initial snapshot",
             "created_at": "2026-11-11T15:35:01.531252Z",
+            "firmware_version_display_name": None,
             "ready": True,
             "base": True,
             "live": False,
@@ -31,6 +32,7 @@ def test_list_shows_each_snapshot_and_marks_none_as_dev_without_one(rce, fake_rc
             "id": 998,
             "name": "Live snapshot",
             "created_at": "2026-11-11T15:35:01.531252Z",
+            "firmware_version_display_name": None,
             "ready": True,
             "base": False,
             "live": True,
@@ -47,11 +49,39 @@ def test_list_for_people_shows_a_table(rce, fake_rce):
 
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
-    assert lines[0].split() == ["ID", "NAME", "CREATED", "READY", "BASE", "LIVE", "DEV"]
+    assert lines[0].split() == ["ID", "NAME", "CREATED", "FIRMWARE", "READY", "BASE", "LIVE", "DEV"]
     assert lines[1].split()[:2] == ["997", "Initial"]
     assert "base" in lines[1] and "live" in lines[2]
     assert lines[3].split()[:2] == ["1001", "dev-ready"]
     assert "no" in lines[3].split()  # not ready yet
+
+
+def test_list_shows_the_firmware_each_snapshot_was_saved_on(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.snapshots[351].append(
+        snapshot_out(1001, "dev-ready") | {"firmware_version_display_name": "v16.0.4 b853"}
+    )
+
+    snapshots = rce.json("snapshot", "list", "player")
+
+    firmware = {s["id"]: s["firmware_version_display_name"] for s in snapshots}
+    assert firmware == {997: None, 998: None, 1001: "v16.0.4 b853"}
+    assert len(fake_rce.requests_to("GET", TAKE)) == 1
+
+
+def test_list_for_people_shows_the_firmware_or_a_dash(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.snapshots[351].append(
+        snapshot_out(1001, "dev-ready") | {"firmware_version_display_name": "v16.0.4 b853"}
+    )
+
+    result = rce.run("snapshot", "list", "player")
+
+    assert result.returncode == 0, result.stderr
+    header, base, live, dev = result.stdout.splitlines()
+    firmware = header.index("FIRMWARE")
+    assert dev[firmware:].startswith("v16.0.4 b853")
+    assert base[firmware:].startswith("- ") and live[firmware:].startswith("- ")
 
 
 def test_list_of_an_unknown_device_exits_3(rce, fake_rce):
@@ -167,6 +197,16 @@ def test_take_creates_a_snapshot_and_waits_until_it_is_ready(rce, fake_rce):
     assert fake_rce.requests_to("GET", f"{TAKE}/{snapshot['id']}")  # it polled
     listed = rce.json("snapshot", "list", "player")
     assert any(s["id"] == snapshot["id"] and s["ready"] for s in listed)
+
+
+def test_take_reports_the_firmware_the_snapshot_was_saved_on(rce, fake_rce):
+    player(rce, fake_rce)
+
+    snapshot = json.loads(take(rce, "--yes", "--json").stdout)
+
+    [listed] = [s for s in rce.json("snapshot", "list", "player") if s["id"] == snapshot["id"]]
+    assert snapshot == listed  # the same object `snapshot list` shows, Firmware included
+    assert "firmware_version_display_name" in snapshot
 
 
 def test_take_says_what_it_took(rce, fake_rce):
