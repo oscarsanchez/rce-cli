@@ -24,9 +24,21 @@ _Avoid_: device config, devices file, settings file
 One start-to-stop period of a Cloud Device. It has its own address and is billed by the minute.
 _Avoid_: session, instance, boot
 
+**Firmware**:
+The Roku OS build a Run runs, chosen when the Run starts. RCE offers two per device type: the current public release and the next release still in development.
+_Avoid_: OS version, Roku OS version
+
 **Snapshot**:
 Saved Cloud Device state that a Run starts from.
 _Avoid_: image, backup, checkpoint
+
+**Base Snapshot**:
+The factory-state Snapshot RCE gives every Cloud Device when it is created.
+_Avoid_: initial snapshot, factory snapshot
+
+**Live Snapshot**:
+The Snapshot RCE saves of a Cloud Device's state at every stop.
+_Avoid_: last state, latest snapshot
 
 **Dev Snapshot**:
 The Snapshot marked as a Cloud Device's default, taken after developer mode and the Dev Password are set.
