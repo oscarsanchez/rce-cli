@@ -4,6 +4,10 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+
+- `rce firmware list [--type tv|stb] [--json]` shows the Firmware RCE offers for each device type (id, device type, display name) and marks the one `device start` uses when given no `--firmware`. It sends one read and starts nothing. The reference's new "Choosing Firmware" section, and the `rce` skill, say which Firmware suits an app, and `device start --help` points `--firmware` to the list.
+
 ## [0.2.3] - 2026-11-22
 
 ### Fixed

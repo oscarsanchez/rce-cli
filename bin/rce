@@ -2272,6 +2272,25 @@ def cmd_usage(args: argparse.Namespace) -> None:
     emit(args, usage, human)
 
 
+def cmd_firmware_list(args: argparse.Namespace) -> None:
+    only = {"device_type": args.type} if args.type else {}
+    firmware = CoreAPI().get("/firmwareVersions", **only, items=0)
+    types = {f["device_type"] for f in firmware}
+    defaults = [default_firmware([f for f in firmware if f["device_type"] == t]) for t in types]
+    listed = [
+        {key: f[key] for key in ("firmware_version_id", "device_type", "display_name")}
+        | {"default": f in defaults}
+        for f in firmware
+    ]
+    rows = [["ID", "TYPE", "DISPLAY NAME", "DEFAULT"]] + [
+        [f["firmware_version_id"], f["device_type"], f["display_name"] or "-"]
+        + ["default" if f["default"] else "-"]
+        for f in listed
+    ]
+    if listed or args.json:  # no Firmware: no table, not even its header
+        emit(args, listed, table(rows))
+
+
 def cmd_device_status(args: argparse.Namespace) -> None:
     ref = config_resolve(args.device)
     report = run_report(get_device(CoreAPI(), ref), ref.name)
@@ -2889,7 +2908,11 @@ def parser() -> argparse.ArgumentParser:
         help="with --pool: look again about every 15 s until a member is free, for up to S s",
     )
     start.add_argument("--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot)")
-    start.add_argument("--firmware", help="firmware version id (default: the latest)")
+    start.add_argument(
+        "--firmware",
+        metavar="ID",
+        help="Firmware id, from `rce firmware list` (default: the one it marks default)",
+    )
     start.add_argument(
         "--max-runtime", type=int, default=DEFAULT_MAX_RUNTIME, help="cap in seconds"
     )
@@ -2950,6 +2973,14 @@ def parser() -> argparse.ArgumentParser:
         "usage", parents=[output], help="trial minutes used and left, or billed minutes"
     )
     usage.set_defaults(func=cmd_usage)
+
+    firmware = areas.add_parser("firmware", help="the Firmware (Roku OS builds) a Run can run")
+    firmware_cmds = firmware.add_subparsers(dest="command", required=True)
+    firmware_list = firmware_cmds.add_parser(
+        "list", parents=[output], help="the Firmware RCE offers, marking device start's default"
+    )
+    firmware_list.add_argument("--type", choices=("tv", "stb"), help="only this device type's")
+    firmware_list.set_defaults(func=cmd_firmware_list)
 
     yes = argparse.ArgumentParser(add_help=False)
     yes.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
