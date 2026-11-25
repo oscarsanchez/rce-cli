@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from conftest import TOKEN
+from conftest import TOKEN, heading_rows
 from fake_rce import WEBRTC_SECRETS, Response, iso
 
 STOP = "/api/v1/devices/351/stop"
@@ -129,7 +129,7 @@ def status_rows(rce) -> dict[str, str]:
     """`device status`'s human output as {heading: value}."""
     result = rce.run("device", "status", "player")
     assert result.returncode == 0, result.stderr
-    return {k: v.strip() for k, v in (line.split(":", 1) for line in result.stdout.splitlines())}
+    return heading_rows(result.stdout.splitlines())
 
 
 def test_status_for_people_names_the_runs_firmware_and_snapshot(rce, fake_rce):

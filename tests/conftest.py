@@ -25,6 +25,11 @@ REPO = Path(__file__).resolve().parent.parent
 RCE = REPO / "bin" / "rce"
 TOKEN = "eyJfake.rce-token.SECRET"
 
+
+def heading_rows(lines: list[str]) -> dict[str, str]:
+    """`rce`'s human "Heading: value" lines as {heading: value}."""
+    return {k: v.strip() for k, v in (line.split(":", 1) for line in lines)}
+
 # `rce` runs through `uv run --script`; keep uv's real cache and Python installs
 # so a temp HOME doesn't make every test re-resolve the environment.
 _UV_DIRS = {

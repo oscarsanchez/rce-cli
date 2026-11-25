@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timedelta
 
 import pytest
-from conftest import TOKEN
+from conftest import TOKEN, heading_rows
 from fake_rce import (
     ALREADY_RUNNING,
     NO_ANSWER,
@@ -135,7 +135,7 @@ def test_start_json_names_the_runs_firmware_next_to_its_id(rce, fake_rce):
 def start_rows(result) -> dict[str, str]:
     """The lines under `device start`'s human report, as {heading: value}."""
     assert result.returncode == 0, result.stderr
-    return {k: v.strip() for k, v in (line.split(":", 1) for line in result.stdout.splitlines()[1:])}
+    return heading_rows(result.stdout.splitlines()[1:])
 
 
 def test_start_for_people_names_the_firmware_and_the_live_snapshot_without_a_dev_snapshot(
