@@ -798,16 +798,22 @@ def stop_run(
     )
 
 
+def default_firmware(firmware: list[dict]) -> dict:
+    """The Firmware `device start` uses when given none, from RCE's Firmware for one
+    device type: the highest display version."""
+
+    def version(entry: dict) -> list[int]:
+        return [int(n) for n in re.findall(r"\d+", entry.get("display_name") or "")]
+
+    return max(firmware, key=version)
+
+
 def latest_firmware(api: CoreAPI, device_type: str) -> str:
-    """The newest firmware RCE offers for a device type, by its display version."""
-    versions = api.get("/firmwareVersions", device_type=device_type, items=0)
-    if not versions:
-        raise RceError(REFUSED, f"RCE offers no firmware for device type {device_type!r}")
-
-    def version(firmware: dict) -> list[int]:
-        return [int(n) for n in re.findall(r"\d+", firmware.get("display_name") or "")]
-
-    return max(versions, key=version)["firmware_version_id"]
+    """The id of the default Firmware for a device type."""
+    firmware = api.get("/firmwareVersions", device_type=device_type, items=0)
+    if not firmware:
+        raise RceError(REFUSED, f"RCE offers no Firmware for device type {device_type!r}")
+    return default_firmware(firmware)["firmware_version_id"]
 
 
 def live_snapshot_id(api: CoreAPI, ref: DeviceRef) -> int:
