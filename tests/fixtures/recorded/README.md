@@ -54,3 +54,6 @@ The start's 202 isn't recorded either (`record-live` starts through `rce device 
 | The screenshot JPEG | A picture of the screen; the fake's bytes only need to round-trip. |
 | WebSocket bridges (console 8085, forwarded ports), their close codes, the 503 `upstream connect error` | `record-live` records HTTP only. Close code 1003 and the 503 text are from the Instance API spec and the rce-cli live checks. |
 | `usage-user` buckets | Tests set them; the recording gives the envelope. |
+| The Cloud Device's `firmware_version_id` and `firmware_version_display_name` taking the Run's Firmware at the start request (the fake's `set_firmware`) | `device-running` only shows them equal to the Run's while it is running; when RCE sets them (at the start request, or only once running) is unrecorded. Firmware ticket 04's live Run is due to record it. |
+| A Cloud Device naming a different Firmware than its Run | Never seen; `run_info` then gives the Run no `firmware_version_display_name`, and tests set it by hand. Ticket 04's Run, started on the other Firmware, is due to show whether RCE ever answers this. |
+| A Run with `snapshot_name: null` | `device-running` names its Snapshot; tests set `null` by hand for a Snapshot RCE gives no name. Not seen live. |
