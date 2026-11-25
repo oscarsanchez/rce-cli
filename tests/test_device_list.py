@@ -55,7 +55,21 @@ def test_device_list_json_shows_the_active_run_without_webrtc_credentials(rce, f
         "snapshot_id": 998,
         "snapshot_name": "Live snapshot",
         "firmware_version_id": "395",
+        "firmware_version_display_name": "v16.0.4 b853",
     }
+
+
+def test_device_list_json_gives_no_firmware_name_when_the_device_names_another_firmware(
+    rce, fake_rce
+):
+    device = fake_rce.add_device(351, "Personal RCE Player", "stb", running=True)
+    device["firmware_version_id"] = "304"  # the Cloud Device's Firmware isn't the Run's
+    device["firmware_version_display_name"] = "v15.3.4 b872"
+
+    [device] = rce.json("device", "list")
+
+    assert device["run"]["firmware_version_id"] == "395"
+    assert device["run"]["firmware_version_display_name"] is None
 
 
 def test_device_list_never_prints_the_token_or_webrtc_credentials(rce, fake_rce):
@@ -67,6 +81,16 @@ def test_device_list_never_prints_the_token_or_webrtc_credentials(rce, fake_rce)
         output = result.stdout + result.stderr
         for secret in (TOKEN, *WEBRTC_SECRETS):
             assert secret not in output
+
+
+def test_device_list_for_people_falls_back_to_the_firmware_id_without_a_name(rce, fake_rce):
+    fake_rce.add_device(351, "Personal RCE Player", "stb", running=True)["firmware_version_id"] = "304"
+
+    result = rce.run("device", "list")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[1].split()[-1] == "395"
+    assert [(r.method, r.path) for r in fake_rce.requests] == [("GET", "/api/v1/devices")]
 
 
 def test_device_list_running_shows_only_cloud_devices_with_a_run(rce, fake_rce):
@@ -95,7 +119,7 @@ def test_device_list_prints_a_table_for_people(rce, fake_rce):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        "ID   DEVICE NAME  RCE NAME             TYPE  STATUS    RUN",
-        "352  -            Personal RCE TV      tv    shutdown  -",
-        "351  player       Personal RCE Player  stb   running   since 2026-11-16T21:00:00Z",
+        "ID   DEVICE NAME  RCE NAME             TYPE  STATUS    RUN                         FIRMWARE",
+        "352  -            Personal RCE TV      tv    shutdown  -                           -",
+        "351  player       Personal RCE Player  stb   running   since 2026-11-16T21:00:00Z  v16.0.4 b853",
     ]

@@ -171,6 +171,20 @@ UPSTREAM_ERROR = Response(
 FIRMWARE_VERSIONS = recorded("firmware-versions")  # in RCE's order
 
 
+def firmware_display_name(firmware_version_id: str) -> str | None:
+    """The recorded Firmware list's display name for an id; None for one RCE doesn't offer."""
+    return next(
+        (f["display_name"] for f in FIRMWARE_VERSIONS if f["firmware_version_id"] == firmware_version_id),
+        None,
+    )
+
+
+def set_firmware(device: dict, firmware_version_id: str) -> None:
+    """Set the Cloud Device's Firmware from its latest Run, as RCE does."""
+    device["firmware_version_id"] = firmware_version_id
+    device["firmware_version_display_name"] = firmware_display_name(firmware_version_id)
+
+
 @dataclass
 class Bridge:
     """What the fake's WebSocket TCP bridge for one port does."""
@@ -477,6 +491,7 @@ class FakeRCE:
         device["status"] = "running"
         device["running_device"] = running_device(self._next_run_id, uuid, self.host)
         device["running_device"]["instance_api_url"] = self.address(uuid)
+        set_firmware(device, device["running_device"]["firmware_version_id"])
         self._input_ready_at[uuid] = 0.0
         self._next_run_id += 1
 
@@ -677,10 +692,15 @@ class FakeRCE:
             running_at=None,
             instance_api_url=None,  # RCE gives the address once the Run is running
             snapshot_id=body["snapshot_id"],
+            snapshot_name=next(
+                (x["name"] for x in self.snapshots[device["id"]] if x["id"] == body["snapshot_id"]),
+                None,  # a Snapshot the fake wasn't given
+            ),
             firmware_version_id=body["firmware_version_id"],
             max_runtime=body["max_runtime"],
         )
         device.update(status="pending", running_device=run)
+        set_firmware(device, body["firmware_version_id"])
         self._due[device["id"]] = ("running", time.monotonic() + self.boot_delay)
         self._hidden_reads[device["id"]] = self.run_hidden_reads
         if self.start_status != 202:

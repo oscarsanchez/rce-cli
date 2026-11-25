@@ -4,6 +4,11 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+
+- Every Run report names its Firmware. The `run` object of `device list`, `device show`, `device start`, `device stop` and `device status --json` gains `firmware_version_display_name` (e.g. `v16.0.4 b853`) next to `firmware_version_id`, or `null` when RCE gives none. `device list` adds a `FIRMWARE` column (`--pool` too), and `device start` and `device status` add a `Firmware:` line, showing the id when there is no name.
+- `device start` and `device status` add a `Snapshot: <id> (<name>)` line naming the Snapshot the Run started from: the Dev Snapshot, or the Live Snapshot when `device start` fell back to it.
+
 ## [0.2.3] - 2026-11-22
 
 ### Fixed

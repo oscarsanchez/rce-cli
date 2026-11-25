@@ -49,6 +49,14 @@ def test_show_of_an_unknown_id_is_not_found(rce, fake_rce):
     assert rce.run("device", "show", "999").returncode == 3
 
 
+def test_show_json_names_the_runs_firmware(rce, fake_rce):
+    fake_rce.add_device(351, "Personal RCE Player", "stb", running=True)
+
+    run = rce.json("device", "show", "351")["run"]
+
+    assert (run["firmware_version_id"], run["firmware_version_display_name"]) == ("395", "v16.0.4 b853")
+
+
 def test_show_prints_fields_for_people_without_secrets(rce, fake_rce):
     fake_rce.add_device(351, "Personal RCE Player", "stb", running=True)
     rce.name_device("351", "player")
