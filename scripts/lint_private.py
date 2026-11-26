@@ -1,6 +1,10 @@
 """Fail when a private term appears in a file git would publish.
 
-Usage: lint_private.py [ROOT]   (default: this repo)
+Usage: lint_private.py [ROOT] [--file PATH ...]   (ROOT defaults to this repo)
+
+With `--file`, it checks only the named files, with ROOT's terms: for text that leaves
+the machine without being a tracked file, such as a commit message (the commit-msg hook)
+or release notes.
 
 The terms (ids of the maintainer's own Cloud Devices and Snapshots: not secret, but
 examples use invented ids so readers don't copy real ones) are listed one per line in
@@ -13,6 +17,7 @@ passes. Matching is whole-term: `4242` doesn't match `42420` or `142425`.
 
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
@@ -48,7 +53,7 @@ def publishable_files(root: Path) -> list[str]:
     return [name for name in listed if name != TERMS_FILE]
 
 
-def main(root: Path) -> int:
+def main(root: Path, files: list[str] | None = None) -> int:
     terms = read_terms(root)
     if not terms:
         return 0
@@ -56,7 +61,7 @@ def main(root: Path) -> int:
         r"(?<![0-9A-Za-z])(" + "|".join(map(re.escape, terms)) + r")(?![0-9A-Za-z])"
     )
     problems = 0
-    for name in publishable_files(root):
+    for name in files or publishable_files(root):
         try:
             text = (root / name).read_text()
         except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
@@ -69,5 +74,12 @@ def main(root: Path) -> int:
 
 
 if __name__ == "__main__":
-    default_root = Path(__file__).resolve().parent.parent
-    sys.exit(main(Path(sys.argv[1]) if len(sys.argv) > 1 else default_root))
+    parser = argparse.ArgumentParser(description="Fail when a private term appears in a file.")
+    parser.add_argument("root", nargs="?", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--file", action="append", dest="files", metavar="PATH",
+                        help="check only this file (repeatable)")
+    args = parser.parse_args()
+    files = [str(Path(name).resolve()) for name in args.files or []]
+    if missing := [name for name in files if not Path(name).is_file()]:
+        parser.error(f"no such file: {', '.join(missing)}")
+    sys.exit(main(args.root, files))

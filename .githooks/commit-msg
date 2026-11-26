@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Enabled with `git config core.hooksPath .githooks` (see docs/development.md).
+# Fails a commit whose message holds a term from .private-terms: the pre-commit
+# check lints files, and a message is published with them.
+root="$(git rev-parse --show-toplevel)"
+unset $(git rev-parse --local-env-vars)
+exec uv run --quiet python "$root/scripts/lint_private.py" "$root" --file "$1"

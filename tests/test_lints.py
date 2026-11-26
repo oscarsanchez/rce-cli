@@ -16,10 +16,10 @@ _Avoid_: base image, backup
 """
 
 
-def lint(name: str, root) -> subprocess.CompletedProcess:
+def lint(name: str, root, *args: str, cwd=None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(REPO / "scripts" / name), str(root)],
-        capture_output=True, text=True,
+        [sys.executable, str(REPO / "scripts" / name), str(root), *args],
+        capture_output=True, text=True, cwd=cwd,
     )
 
 
@@ -137,6 +137,36 @@ def test_private_lint_passes_outside_a_git_repo(tmp_path):
     result = lint("lint_private.py", tmp_path)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_private_lint_checks_a_named_file_git_would_not_publish(tmp_path):
+    root = repo_with(tmp_path, {".private-terms": "4242\n", "README.md": "clean\n"})
+    message = tmp_path / ".git" / "COMMIT_EDITMSG"
+    message.write_text("feat: start\n\nThe Dev Snapshot 4242 kept its Firmware.\n")
+
+    result = lint("lint_private.py", root, "--file", str(message))
+
+    assert result.returncode == 1
+    assert f"{message}:3" in result.stdout
+
+
+def test_private_lint_passes_a_clean_named_file_whatever_the_repo_holds(tmp_path):
+    root = repo_with(tmp_path, {".private-terms": "4242\n", "README.md": "auto is 4242\n"})
+    notes = tmp_path / "notes.md"
+    notes.write_text("Run 142425 and 42420\n")
+
+    result = lint("lint_private.py", root, "--file", str(notes))
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_private_lint_fails_on_a_named_file_that_is_missing(tmp_path):
+    root = repo_with(tmp_path, {".private-terms": "4242\n"})
+
+    result = lint("lint_private.py", root, "--file", "v0.9.9-notes.md", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "no such file" in result.stderr
 
 
 def worktree_of(main, tmp_path):
