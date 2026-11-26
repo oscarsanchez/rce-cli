@@ -35,6 +35,8 @@ Recorded 2026-11-17 by `scripts/record-live player --run` from `player` (351), R
 
 The start's 202 isn't recorded either (`record-live` starts through `rce device start`), but it isn't invented: the fake follows the shape seen live on Run 4615 (`auto`, 2026-11-19). The Cloud Device is `pending` with `running_device: null`, and the Run (still with no `instance_api_url`) shows on a later read. The fake builds that Run from `device-running`.
 
+Seen live, not recorded (Run 5449, `auto`, 2026-11-26: its Dev Snapshot, saved on `v16.0.4 b853` (395), started with `--firmware 304`): the Snapshot a Run starts from keeps its `firmware_version_id`, during the Run and after its stop. The Live Snapshot's `firmware_version_id` and display name become the Run's (`v15.3.4 b872`) by the time it is `running`, and stay so after the stop. `rce`'s Firmware warning relies on the first; the fake models neither (its Snapshots don't change Firmware on a start).
+
 ## What the fake still invents
 
 | Shape | Why it is not recorded |
@@ -54,3 +56,6 @@ The start's 202 isn't recorded either (`record-live` starts through `rce device 
 | The screenshot JPEG | A picture of the screen; the fake's bytes only need to round-trip. |
 | WebSocket bridges (console 8085, forwarded ports), their close codes, the 503 `upstream connect error` | `record-live` records HTTP only. Close code 1003 and the 503 text are from the Instance API spec and the rce-cli live checks. |
 | `usage-user` buckets | Tests set them; the recording gives the envelope. |
+| The Cloud Device's `firmware_version_id` and `firmware_version_display_name` taking the Run's Firmware at the start request (the fake's `set_firmware`) | `device-running` only shows them equal to the Run's while it is running. Seen live but not recorded (Runs 5364, 5449 on `auto`, Firmware 304, 2026-11-26): while `pending`, `device show` has no Run to compare; once `running`, they equal the Run's. Whether RCE sets them at the start request stays unseen, and `rce` shows nothing Firmware-related before then. |
+| A Cloud Device naming a different Firmware than its Run | Never seen, including on four Runs started on the non-default Firmware (2026-11-26); `run_info` then gives the Run no `firmware_version_display_name`, and tests set it by hand. |
+| A Run with `snapshot_name: null` | `device-running` names its Snapshot; tests set `null` by hand for a Snapshot RCE gives no name. Not seen live. |

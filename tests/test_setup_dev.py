@@ -341,3 +341,14 @@ def test_setup_dev_generates_its_own_dev_password_even_with_rce_dev_password_set
     password = rce.read_config()["devices"]["player"]["dev_password"]
     assert re.fullmatch(r"[A-Za-z0-9]{16,}", password)
     assert keys_typed(fake_rce) == [f"Lit_{c}" for c in password]
+
+
+def test_setup_dev_gives_no_firmware_warning_for_its_live_snapshot(rce, fake_rce):
+    fresh_player(rce, fake_rce)
+    [live] = [s for s in fake_rce.snapshots[351] if s["live"]]
+    live.update(firmware_version_id="304", firmware_version_display_name="v15.3.4 b872")
+
+    result = rce.run("device", "setup-dev", "player", "--yes")
+
+    assert fake_rce.requests_to("POST", START)  # it did start a Run
+    assert "saved on Firmware" not in result.stderr

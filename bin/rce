@@ -537,15 +537,29 @@ RUN_FIELDS = (
 )
 
 
-def device_summary(device: dict, device_name: str | None) -> dict:
+def run_info(device: dict) -> dict | None:
+    """The Cloud Device's Run as rce shows it, or None without one.
+
+    RCE's Run has no Firmware display name; the Cloud Device has its latest Run's,
+    so it counts only when the device's Firmware id is the Run's.
+    """
     run = device.get("running_device")
+    if not run:
+        return None
+    same = device.get("firmware_version_id") == run.get("firmware_version_id")
+    return {key: run.get(key) for key in RUN_FIELDS} | {
+        "firmware_version_display_name": device.get("firmware_version_display_name") if same else None
+    }
+
+
+def device_summary(device: dict, device_name: str | None) -> dict:
     return {
         "id": device["id"],
         "device_name": device_name,
         "name": device["name"],
         "type": device["device_type"],
         "status": device["status"],
-        "run": {key: run.get(key) for key in RUN_FIELDS} if run else None,
+        "run": run_info(device),
     }
 
 
@@ -798,37 +812,43 @@ def stop_run(
     )
 
 
-def latest_firmware(api: CoreAPI, device_type: str) -> str:
-    """The newest firmware RCE offers for a device type, by its display version."""
-    versions = api.get("/firmwareVersions", device_type=device_type, items=0)
-    if not versions:
-        raise RceError(REFUSED, f"RCE offers no firmware for device type {device_type!r}")
+def default_firmware(firmware: list[dict]) -> dict:
+    """The Firmware `device start` uses when given none, from RCE's Firmware for one
+    device type: the highest display version."""
 
-    def version(firmware: dict) -> list[int]:
-        return [int(n) for n in re.findall(r"\d+", firmware.get("display_name") or "")]
+    def version(entry: dict) -> list[int]:
+        return [int(n) for n in re.findall(r"\d+", entry.get("display_name") or "")]
 
-    return max(versions, key=version)["firmware_version_id"]
+    return max(firmware, key=version)
+
+
+def default_firmware_id(api: CoreAPI, device_type: str) -> str:
+    """The id of the default Firmware for a device type."""
+    firmware = api.get("/firmwareVersions", device_type=device_type, items=0)
+    if not firmware:
+        raise RceError(REFUSED, f"RCE offers no Firmware for device type {device_type!r}")
+    return default_firmware(firmware)["firmware_version_id"]
 
 
 def live_snapshot_id(api: CoreAPI, ref: DeviceRef) -> int:
-    """The Snapshot RCE marks `live`: the Cloud Device's latest state, saved on every stop."""
+    """The Cloud Device's Live Snapshot (RCE marks it `live`): its state, saved at every stop."""
     snapshots = api.get(f"/devices/{ref.id}/snapshots", items=0)
     live = next((s["id"] for s in snapshots if s.get("live")), None)
     if live is None:
         raise RceError(
             NOT_FOUND,
-            f"{ref.display} has no live Snapshot. Pick one with --snapshot.",
+            f"{ref.display} has no Live Snapshot. Pick one with --snapshot.",
         )
     return live
 
 
 def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
-    """--snapshot, else the Dev Snapshot, else the latest live state (with a warning).
-    With `options.latest`, the latest live state straight away.
+    """--snapshot, else the Dev Snapshot, else the Live Snapshot (with a warning).
+    With `options.latest`, the Live Snapshot straight away.
 
-    The latest live state is the Snapshot RCE marks `live` (saved on every
-    stop), not the device's `last_snapshot_id`, which is the Snapshot its last
-    Run started from and may be the base: starting from that resets it.
+    The Live Snapshot is the one RCE marks `live` (saved at every stop), not the
+    device's `last_snapshot_id`, which is the Snapshot its last Run started from
+    and may be the Base Snapshot: starting from that resets it.
     """
     if options.snapshot is not None:
         return options.snapshot
@@ -839,22 +859,44 @@ def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
         return dev
     live = live_snapshot_id(api, ref)
     warn(
-        f"{ref.display} has no Dev Snapshot; starting from its latest live "
-        f"state (Snapshot {live}). It may not be in developer mode."
+        f"{ref.display} has no Dev Snapshot; starting from its Live Snapshot {live}. "
+        "It may not be in developer mode."
     )
     return live
+
+
+def other_firmware_warning(api: CoreAPI, ref: DeviceRef, snapshot_id: int, firmware_id: str) -> str | None:
+    """The warning for a Run that gets another Firmware than its Snapshot was saved on:
+    there a Dev Snapshot's dev app may not launch (live check, 2026-11-26). Advisory: a
+    failed or empty read of the Snapshot gives none."""
+    try:
+        snapshot = api.get(f"/devices/{ref.id}/snapshots/{snapshot_id}")
+    except RceError:
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    saved_on = snapshot.get("firmware_version_id")
+    if saved_on is None or saved_on == firmware_id:
+        return None
+    name = f" ({snapshot['name']})" if snapshot.get("name") else ""
+    shown = snapshot.get("firmware_version_display_name")
+    return (
+        f"Snapshot {snapshot_id}{name} was saved on Firmware "
+        f"{f'{shown} ({saved_on})' if shown else saved_on}; this Run gets Firmware {firmware_id}, "
+        f"where the dev app may not launch. To match it: `rce device start {ref.arg} --firmware {saved_on}`."
+    )
 
 
 @dataclass(frozen=True)
 class StartOptions:
     """How to start a Run: `device start`'s flags, and their defaults."""
 
-    snapshot: int | None = None  # None: the Dev Snapshot, else the latest live state
-    firmware: str | None = None  # None: the latest for the device type
+    snapshot: int | None = None  # None: the Dev Snapshot, else the Live Snapshot
+    firmware: str | None = None  # None: the default Firmware for the device type
     max_runtime: int = DEFAULT_MAX_RUNTIME
     wait: bool = True  # until the Run takes input; else only until RCE shows the Run
     timeout: float = DEFAULT_START_TIMEOUT
-    # setup-dev's: with no snapshot, the latest live state, even with a Dev Snapshot
+    # setup-dev's: with no snapshot, the Live Snapshot, even with a Dev Snapshot
     latest: bool = False
 
 
@@ -915,9 +957,14 @@ class CommandRun:
             announce("start")
         body = {
             "snapshot_id": start_snapshot(api, options, ref),
-            "firmware_version_id": options.firmware or latest_firmware(api, device["device_type"]),
+            "firmware_version_id": options.firmware or default_firmware_id(api, device["device_type"]),
             "max_runtime": options.max_runtime,
         }
+        # setup-dev's Live Snapshot has no dev app yet. Read before the start, which may
+        # change the Snapshot; warned only once RCE accepts it (a Pool skips refused members).
+        warning = None if options.latest else other_firmware_warning(
+            api, ref, body["snapshot_id"], body["firmware_version_id"]
+        )
         try:
             self.start_unknown = True
             try:
@@ -931,6 +978,8 @@ class CommandRun:
                 raise self._uncertain(error)
             self.start_unknown = False
             self.started = True
+            if warning:
+                warn(warning)
             wait = wait_until_ready if options.wait else wait_for_run
             try:
                 self.device = wait(api, ref, options.timeout)
@@ -1309,7 +1358,7 @@ def take_screenshot(installer: Installer) -> bytes:
 
 def snapshot_view(snapshot: dict, dev_id: int | None) -> dict:
     """What rce shows of a SnapshotOut, and whether it is the Dev Snapshot."""
-    keys = ("id", "name", "created_at", "ready", "base", "live")
+    keys = ("id", "name", "created_at", "firmware_version_display_name", "ready", "base", "live")
     return {key: snapshot[key] for key in keys} | {"dev_snapshot": snapshot["id"] == dev_id}
 
 
@@ -2096,18 +2145,34 @@ def cmd_token_status(args: argparse.Namespace) -> None:
     emit(args, status, table(rows))
 
 
-LIST_HEADER = ["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN"]
+LIST_HEADER = ["ID", "DEVICE NAME", "RCE NAME", "TYPE", "STATUS", "RUN", "FIRMWARE"]
+
+
+def shown_firmware(run: dict) -> str:
+    """The Firmware a Run is on, by display name, else by id."""
+    return run["firmware_version_display_name"] or run["firmware_version_id"]
+
+
+def firmware_and_snapshot_rows(run: dict) -> list[list[str]]:
+    """The Firmware a Run is on (by name, else id) and the Snapshot it started from."""
+    snapshot, name = str(run["snapshot_id"]), run["snapshot_name"]
+    return [
+        ["Firmware:", shown_firmware(run)],
+        ["Snapshot:", f"{snapshot} ({name})" if name else snapshot],
+    ]
 
 
 def list_row(device: dict) -> list[str]:
     """A `device_summary` as a row of the `device list` table."""
+    run = device["run"]
     return [
         str(device["id"]),
         device["device_name"] or "-",
         device["name"],
         device["type"],
         device["status"],
-        f"since {device['run']['created_at']}" if device["run"] else "-",
+        f"since {run['created_at']}" if run else "-",
+        shown_firmware(run) if run else "-",
     ]
 
 
@@ -2237,7 +2302,8 @@ def cmd_device_start(args: argparse.Namespace) -> None:
         f"{claimed}{ref.display} {state}: Run {report['run']['id']}, "
         f"{usd(report['hourly_cost_usd'])}/h, "
         f"auto-stops around {local_time(parse_time(report['auto_stop_at']))}. "
-        f"Stop it with `rce device stop {ref.arg}`.",
+        f"Stop it with `rce device stop {ref.arg}`.\n"
+        + table(firmware_and_snapshot_rows(report["run"])),
     )
 
 
@@ -2266,6 +2332,36 @@ def cmd_usage(args: argparse.Namespace) -> None:
     emit(args, usage, human)
 
 
+def cmd_firmware_list(args: argparse.Namespace) -> None:
+    only = {"device_type": args.type} if args.type else {}
+    firmware = CoreAPI().get("/firmwareVersions", **only, items=0)
+    types = {f["device_type"] for f in firmware}
+    defaults = {
+        default_firmware([f for f in firmware if f["device_type"] == t])["firmware_version_id"]
+        for t in types
+    }
+    listed = [
+        {
+            "firmware_version_id": f["firmware_version_id"],
+            "device_type": f["device_type"],
+            "display_name": f["display_name"],
+            "default": f["firmware_version_id"] in defaults,
+        }
+        for f in firmware
+    ]
+    rows = [["ID", "TYPE", "DISPLAY NAME", "DEFAULT"]] + [
+        [
+            f["firmware_version_id"],
+            f["device_type"],
+            f["display_name"] or "-",
+            "default" if f["default"] else "-",
+        ]
+        for f in listed
+    ]
+    if listed or args.json:  # no Firmware: no table, not even its header
+        emit(args, listed, table(rows))
+
+
 def cmd_device_status(args: argparse.Namespace) -> None:
     ref = config_resolve(args.device)
     report = run_report(get_device(CoreAPI(), ref), ref.name)
@@ -2275,6 +2371,7 @@ def cmd_device_status(args: argparse.Namespace) -> None:
         created, auto_stop = parse_time(run["created_at"]), parse_time(report["auto_stop_at"])
         rows += [
             ["Run:", str(run["id"])],
+            *firmware_and_snapshot_rows(run),
             ["Run started:", f"{iso(created)} ({local_time(created)} local)"],
             ["Cap:", f"{run['max_runtime'] // 60} min, auto-stops around {local_time(auto_stop)}"],
             [
@@ -2527,8 +2624,14 @@ def cmd_snapshot_list(args: argparse.Namespace) -> None:
     snapshots = [
         snapshot_view(s, dev) for s in CoreAPI().get(f"/devices/{ref.id}/snapshots", items=0)
     ]
-    rows = [["ID", "NAME", "CREATED", "READY", "BASE", "LIVE", "DEV"]] + [
-        [str(s["id"]), s["name"], s["created_at"], "yes" if s["ready"] else "no"]
+    rows = [["ID", "NAME", "CREATED", "FIRMWARE", "READY", "BASE", "LIVE", "DEV"]] + [
+        [
+            str(s["id"]),
+            s["name"],
+            s["created_at"],
+            s["firmware_version_display_name"] or "-",
+            "yes" if s["ready"] else "no",
+        ]
         + [word if s[key] else "-" for key, word in MARKS]
         for s in snapshots
     ]
@@ -2882,8 +2985,14 @@ def parser() -> argparse.ArgumentParser:
         metavar="S",
         help="with --pool: look again about every 15 s until a member is free, for up to S s",
     )
-    start.add_argument("--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot)")
-    start.add_argument("--firmware", help="firmware version id (default: the latest)")
+    start.add_argument(
+        "--snapshot", type=int, help="Snapshot id (default: the Dev Snapshot, else the Live Snapshot)"
+    )
+    start.add_argument(
+        "--firmware",
+        metavar="ID",
+        help="Firmware id, from `rce firmware list` (default: the one it marks default)",
+    )
     start.add_argument(
         "--max-runtime", type=int, default=DEFAULT_MAX_RUNTIME, help="cap in seconds"
     )
@@ -2944,6 +3053,14 @@ def parser() -> argparse.ArgumentParser:
         "usage", parents=[output], help="trial minutes used and left, or billed minutes"
     )
     usage.set_defaults(func=cmd_usage)
+
+    firmware = areas.add_parser("firmware", help="the Firmware (Roku OS builds) a Run can run")
+    firmware_cmds = firmware.add_subparsers(dest="command", required=True)
+    firmware_list = firmware_cmds.add_parser(
+        "list", parents=[output], help="the Firmware RCE offers, marking device start's default"
+    )
+    firmware_list.add_argument("--type", choices=("tv", "stb"), help="only this device type's")
+    firmware_list.set_defaults(func=cmd_firmware_list)
 
     yes = argparse.ArgumentParser(add_help=False)
     yes.add_argument("--yes", action="store_true", help="skip the confirmation prompt")

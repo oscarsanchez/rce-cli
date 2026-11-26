@@ -4,6 +4,20 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+
+- `rce firmware list [--type tv|stb] [--json]` shows the Firmware RCE offers for each device type (id, device type, display name) and marks the one `device start` uses when given no `--firmware`. It sends one read and starts nothing. The reference's new "Choosing Firmware" section, and the `rce` skill, say which Firmware suits an app, and `device start --help` points `--firmware` to the list.
+- Every Run report names its Firmware. The `run` object of `device list`, `device show`, `device start`, `device stop` and `device status --json` gains `firmware_version_display_name` (e.g. `v16.0.4 b853`) next to `firmware_version_id`, or `null` when RCE gives none. `device list` adds a `FIRMWARE` column (`--pool` too), and `device start` and `device status` add a `Firmware:` line, showing the id when there is no name.
+- `device start` and `device status` add a `Snapshot: <id> (<name>)` line naming the Snapshot the Run started from: the Dev Snapshot, or the Live Snapshot when `device start` fell back to it.
+- `rce snapshot list` shows the Firmware each Snapshot was saved on, in a new FIRMWARE column (`-` when RCE gives none). Its `--json`, and `snapshot take --json`, add `firmware_version_display_name` to each Snapshot.
+- `device start`, and every command that starts a Run except `setup-dev`, warns when the Run's Firmware differs from the Firmware its Snapshot was saved on, naming the `rce device start … --firmware` that matches: on another Firmware a Dev Snapshot's dev app may not launch. It still starts. It reads the Snapshot once before the start and warns once RCE accepts it, so a Pool Claim warns only for the member it claims; a failed read skips the warning.
+- "Choosing a Snapshot" in the reference's Snapshots section, with a short version in the `rce` skill: start from the Dev Snapshot, from the Live Snapshot only to carry on from the last Run, and leave the Base Snapshot alone (it isn't in developer mode).
+
+### Changed
+
+- The docs, the `rce` skill, `device start --help` and `rce`'s messages name the Base Snapshot and the Live Snapshot. `device start`'s warning when a Cloud Device has no Dev Snapshot now reads "starting from its Live Snapshot <id>". The `BASE` and `LIVE` columns and the `base` and `live` JSON keys are unchanged.
+- `device start`'s error when RCE offers no Firmware for the Cloud Device's type now reads "RCE offers no Firmware for device type ..." (it said "firmware").
+
 ## [0.2.3] - 2026-11-22
 
 ### Fixed

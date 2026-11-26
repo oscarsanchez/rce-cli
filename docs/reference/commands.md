@@ -36,6 +36,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 | `rce device start --pool [--wait-free S] [--firmware ID] [--max-runtime S] [--no-wait] [--timeout S] [--json]` | Claim a Free Cloud Device of the Pool (`RCE_POOL`) by starting it, then go on as `device start` does, with the same output plus "Claimed Cloud Device <id> (Run <run id>)". With none free it exits 4 at once; `--wait-free S` looks again about every 15 s, for up to S seconds, then exits 5 with nothing started. No queue and no fairness. See [Claiming from a Pool](#claiming-from-a-pool). |
 | `rce device stop <device> [--run ID] [--wait] [--timeout S] [--wait-lock] [--json]` | End the Run and say what it cost. `--run` stops it only while Run `ID` is the current one: with another Run or none it exits 4, "Run ID already ended; nothing stopped", and sends no stop. `--wait` waits until the Cloud Device has shut down (default timeout 120 s). Exits 4 if it isn't running. |
 | `rce device status <device> [--json]` | The Cloud Device's state and, during a Run, its start time, cap, auto-stop time, elapsed time and elapsed cost. |
+| `rce firmware list [--type tv\|stb] [--json]` | The Firmware RCE offers, in RCE's order: id, device type, display name (`-` when RCE gives none), and `default` on the one `device start` uses when given no `--firmware`, one per device type. `--type` lists only that device type's. It sends one read and starts nothing. With no Firmware it prints nothing. See [Choosing Firmware](#choosing-firmware). |
 | `rce usage [--json]` | Trial minutes used and left, or, once subscribed, the minutes billed this month. |
 | `rce key <device> <key>… [--delay MS] [--json]` | Press remote keys in order on a running Cloud Device. See [Using a running Cloud Device](#using-a-running-cloud-device). |
 | `rce ecp <device> <path> [--method GET\|POST] [--json]` | Send any ECP command (`query/device-info`, `query/active-app`, `keypress/Home`, …) and print the device's answer. |
@@ -106,12 +107,13 @@ A list of:
     "max_runtime": 3600,
     "snapshot_id": 998,
     "snapshot_name": "Live snapshot",
-    "firmware_version_id": "395"
+    "firmware_version_id": "395",
+    "firmware_version_display_name": "v16.0.4 b853"
   }
 }
 ```
 
-`device_name` is the Cloud Device's Device Name, or `null` without one. `name` is its name on RCE. `type` is RCE's device type (`tv` or `stb`). `status` is `shutdown`, `pending` or `running`. `run` is `null` without an active Run. `run.created_at` is when the start was requested, which is when billing starts. RCE's WebRTC credentials for the Run are never included.
+`device_name` is the Cloud Device's Device Name, or `null` without one. `name` is its name on RCE. `type` is RCE's device type (`tv` or `stb`). `status` is `shutdown`, `pending` or `running`. `run` is `null` without an active Run. `run.created_at` is when the start was requested, which is when billing starts. `run.snapshot_id` and `run.snapshot_name` are the Snapshot the Run started from. `run.firmware_version_id` is the Run's Firmware, and `run.firmware_version_display_name` its Roku OS build (e.g. `v16.0.4 b853`), or `null` when RCE gives none: RCE's Run carries no name, so `rce` takes it from the Cloud Device, which names its latest Run's Firmware, and only when that Firmware is the Run's. RCE's WebRTC credentials for the Run are never included.
 
 With `--pool`, each object also has its Dev Snapshot from `RCE_POOL` and its state: `"dev_snapshot": {"id": 2001, "status": "ready"}`, where `status` is `ready`, `not_ready` (RCE is still saving it) or `missing` (RCE no longer has it: take a new one with `rce device setup-dev` and put its id in `RCE_POOL`).
 
@@ -161,16 +163,37 @@ A Run is billed by the minute from the moment the start is requested, and RCE ha
 `rce device start` defaults to:
 
 - a 3600 s cap (`--max-runtime`); RCE ends the Run on its own schedule a few minutes after the cap, and bills until then;
-- the latest firmware RCE offers for the device type (`--firmware`, an id from RCE's firmware list);
-- the Cloud Device's Dev Snapshot when one is recorded (`dev_snapshot_id` in its Device Name's table), else its latest live state (the Snapshot RCE marks `live`, saved at every stop), with a warning (`--snapshot`).
+- the Firmware with the highest display version RCE offers for the device type, the one `rce firmware list` marks `default` (`--firmware`, an id from that list; see [Choosing Firmware](#choosing-firmware));
+- the Cloud Device's Dev Snapshot when one is recorded (`dev_snapshot_id` in its Device Name's table), else its Live Snapshot (the one RCE marks `live`, saved at every stop), with a warning (`--snapshot`).
 
-It refuses (exit 4) a Cloud Device that is already running. It then waits until the Run is `running` and takes remote input (about 80 s on RCE), and exits 5 after `--timeout` seconds (default 300). `--no-wait` doesn't wait for `running`: it returns as soon as RCE has given the Run an id (RCE answers the start before it shows the Run, so `rce` reads the Cloud Device until it does), and prints the same report. If no Run appears within `--timeout`, that is a failed wait like any other: `rce` stops the Run and exits 5. If the wait times out, fails or is interrupted, `rce` stops the Run so it doesn't keep billing. A failed wait never exits 4, even for a rejected token or a rate limit: RCE accepted the start, so this call made a Run. So does Ctrl-C before RCE answers the start, `--no-wait` or not; if that stop fails because the Cloud Device has no Run, it says the start didn't happen. A start request that gets no answer (it times out or loses its connection) exits 5 or 1, and one answered with a gateway error (502, 503 or 504) exits 1. Either way RCE may have made a Run, so `rce` never retries the start: it looks at the Cloud Device, stops any Run it finds there (or stops one anyway when it can't look), and says whether the start happened. It prints the hourly cost and the time the Run auto-stops.
+It refuses (exit 4) a Cloud Device that is already running. It then waits until the Run is `running` and takes remote input (about 80 s on RCE), and exits 5 after `--timeout` seconds (default 300). `--no-wait` doesn't wait for `running`: it returns as soon as RCE has given the Run an id (RCE answers the start before it shows the Run, so `rce` reads the Cloud Device until it does), and prints the same report. If no Run appears within `--timeout`, that is a failed wait like any other: `rce` stops the Run and exits 5. If the wait times out, fails or is interrupted, `rce` stops the Run so it doesn't keep billing. A failed wait never exits 4, even for a rejected token or a rate limit: RCE accepted the start, so this call made a Run. So does Ctrl-C before RCE answers the start, `--no-wait` or not; if that stop fails because the Cloud Device has no Run, it says the start didn't happen. A start request that gets no answer (it times out or loses its connection) exits 5 or 1, and one answered with a gateway error (502, 503 or 504) exits 1. Either way RCE may have made a Run, so `rce` never retries the start: it looks at the Cloud Device, stops any Run it finds there (or stops one anyway when it can't look), and says whether the start happened. It prints the hourly cost and the time the Run auto-stops, then the Run's Firmware (by display name, else id) and the Snapshot it started from. `device status` shows the same two lines for a running Run.
 
 When RCE refuses a start, `rce` says why in plain words and exits 4: the trial's one-Run limit (naming the Cloud Device that is running; `rce` never stops it for you), a used-up trial, a Snapshot that isn't ready, or a cap over the trial time left or over the organisation's maximum (its `max_project_runtime`, which the message names).
 
 Cost is RCE's price, $0.00333333 per device-minute (AWS Marketplace), times the minutes since the start was requested.
 
 Each Run has its own address, which `rce` always takes from the Core API's answer for that Run, never from a fixed host. Commands that need a Run exit 4 and say so when the Cloud Device isn't running.
+
+### Choosing Firmware
+
+RCE offers two Firmware per device type: the current public Roku OS release and the next one, still in development. Its API doesn't say which is which, so `rce` doesn't call either one public or next; check the display names against Roku's release notes. `device start` uses the one with the highest display version unless you pass `--firmware`.
+
+- **Ids differ between `tv` and `stb`**, even for the same build. `rce firmware list --type tv` (or `stb`) shows the ids for your Cloud Device's type.
+- **RSG 2.0 SDK apps need Roku OS 16.0 or later.** `rk` warns on an install below it, and Effects don't exist below it.
+- **Classic BrightScript/SceneGraph apps**: test on the build your users run, and use the other to catch regressions before it ships.
+- **A Dev Snapshot belongs to the Firmware it was saved on** (`rce snapshot list` shows it). Started on the other Firmware, it comes up in developer mode and installs work, but the dev app may not launch, so `launch` and `screenshot` fail (a live check, 2026-11). `device start`, and every command that starts a Run except `setup-dev`, warns when the Run's Firmware differs from its Snapshot's, names the `rce device start … --firmware` that matches, and still starts. A Snapshot keeps the Firmware it was saved on; the Live Snapshot takes the Firmware of each Run. `setup-dev` saves its Dev Snapshot on the default Firmware.
+- **On 16.0, RCE's DevMode reboot sometimes fails**, a known issue in Roku's RCE release notes: a manual reboot may be needed to put the Cloud Device into developer mode. A `setup-dev` stuck at developer mode on 16.0 is that, not `rce`.
+
+### `firmware list --json`
+
+```json
+[
+  {"firmware_version_id": "303", "device_type": "tv", "display_name": "v15.3.4 b872", "default": false},
+  {"firmware_version_id": "396", "device_type": "tv", "display_name": "v16.0.4 b853", "default": true}
+]
+```
+
+One object per Firmware, in RCE's order. `display_name` is `null` when RCE gives none. Exactly one entry per device type listed has `"default": true`: the one `device start` sends when given no `--firmware`. With no Firmware it prints `[]`.
 
 ### Claiming from a Pool
 
@@ -278,9 +301,17 @@ The installer's own 401 (a Digest challenge) says "wrong or missing Dev Password
 
 ## Snapshots
 
-A Snapshot is saved Cloud Device state that a Run starts from. RCE gives every Cloud Device a `base` Snapshot (its factory state) and a `live` one (its state, saved at every stop). The Dev Snapshot is the one `rce device start` uses by default: the Cloud Device's state after developer mode and the Dev Password are set. It is recorded as `dev_snapshot_id` with the Device Name in the per-user config, so it needs a Device Name. RCE deletes a Snapshot unused for 180 days, so a Dev Snapshot left unused that long is gone: take a new one with `rce device setup-dev`.
+A Snapshot is saved Cloud Device state that a Run starts from. RCE gives every Cloud Device a Base Snapshot (marked `base`: its state when it was created) and a Live Snapshot (marked `live`: its state, saved at every stop). The Dev Snapshot is the one `rce device start` uses by default: the Cloud Device's state after developer mode and the Dev Password are set. It is recorded as `dev_snapshot_id` with the Device Name in the per-user config, so it needs a Device Name. RCE deletes a Snapshot unused for 180 days, so a Dev Snapshot left unused that long is gone: take a new one with `rce device setup-dev`.
 
 `snapshot take` and `snapshot use-as-dev` change saved device state, so they ask first; only `--yes` skips the prompt.
+
+### Choosing a Snapshot
+
+- **Dev Snapshot**: the normal choice, and `device start`'s default. Every Run starts from the same clean, dev-ready state.
+- **Live Snapshot** (`--snapshot <its id>`): only to carry on from the last Run, with whatever it left behind: the installed dev app, the registry, sign-ins. `device start` falls back to it, with a warning, when there is no Dev Snapshot; the `LIVE` column of `snapshot list` shows which one it is.
+- **Base Snapshot**: factory state, from when the Cloud Device was created. A Run started from it isn't in developer mode, so leave it alone: `rce device setup-dev` is what takes a Cloud Device from factory state to a Dev Snapshot.
+
+RCE warns that changing the Roku account linked on one Snapshot affects the others: link only one account to a Cloud Device.
 
 ### `snapshot list` and `take --json`
 
@@ -291,6 +322,7 @@ A list of:
   "id": 1001,
   "name": "dev-ready",
   "created_at": "2026-11-16T21:30:00Z",
+  "firmware_version_display_name": "v16.0.4 b853",
   "ready": true,
   "base": false,
   "live": false,
@@ -298,7 +330,7 @@ A list of:
 }
 ```
 
-`ready` is false while RCE is still saving it; a Run can't start from it until then. `dev_snapshot` marks the Dev Snapshot.
+`firmware_version_display_name` is the Firmware the Snapshot was saved on, `null` when RCE gives none (as for the Base Snapshot). The human table shows it in the FIRMWARE column, `-` when null. `ready` is false while RCE is still saving it; a Run can't start from it until then. `dev_snapshot` marks the Dev Snapshot.
 
 `snapshot take --json` prints the same object for the new Snapshot, once ready.
 
@@ -312,7 +344,7 @@ A list of:
 
 `rce device setup-dev <device>` takes a fresh Cloud Device (it needs a Device Name) to a Dev Snapshot. It changes saved device state and starts a billed Run, so it asks first, showing the hourly cost; only `--yes` skips the question. Without a terminal and without `--yes` it starts nothing and exits 4, saying it needs a person at a terminal. The steps:
 
-1. **Start** a Run from the Cloud Device's latest (`live`) state, capped at 60 minutes. A Run that is already going is used instead.
+1. **Start** a Run from the Cloud Device's Live Snapshot, capped at 60 minutes. A Run that is already going is used instead.
 2. **Account link** (you): guided setup in the RCE web viewer, and activating the Cloud Device with your Roku account. Roku emails an activation link that you must open within 30 minutes.
 3. **Developer mode**: `rce` generates a 16-character Dev Password and stores it with the Device Name (mode 0600), opens Developer Settings with RCE's developer-settings shortcut, and asks you to enable the installer and accept the licence in the viewer. When the password keyboard shows, `rce` types the password with remote keys; you select "Set password and reboot".
 4. **Control by mobile apps** (you): Settings > System > Advanced system settings > Control by mobile apps > Network access, set to Permissive. Its choices are Enabled, Permissive, Disabled and Limited (the default); Enabled works too.

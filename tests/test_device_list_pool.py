@@ -24,10 +24,10 @@ def test_device_list_pool_shows_only_the_members_in_pool_order_and_how_many_are_
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        "ID   DEVICE NAME  RCE NAME  TYPE  STATUS    RUN                         DEV SNAPSHOT",
-        "377  -            pool-3    stb   shutdown  -                           1063 ready",
-        "375  -            pool-1    stb   running   since 2026-11-16T21:00:00Z  2001 ready",
-        "376  -            pool-2    stb   shutdown  -                           2002 ready",
+        "ID   DEVICE NAME  RCE NAME  TYPE  STATUS    RUN                         FIRMWARE      DEV SNAPSHOT",
+        "377  -            pool-3    stb   shutdown  -                           -             1063 ready",
+        "375  -            pool-1    stb   running   since 2026-11-16T21:00:00Z  v16.0.4 b853  2001 ready",
+        "376  -            pool-2    stb   shutdown  -                           -             2002 ready",
         "2 of 3 free",
     ]
 
@@ -91,6 +91,7 @@ def test_device_list_pool_json_is_the_device_list_shape_with_each_dev_snapshot(r
                 "snapshot_id": 998,
                 "snapshot_name": "Live snapshot",
                 "firmware_version_id": "395",
+                "firmware_version_display_name": "v16.0.4 b853",
             },
             "dev_snapshot": {"id": 2001, "status": "ready"},
         },

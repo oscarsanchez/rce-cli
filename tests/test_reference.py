@@ -37,7 +37,7 @@ def test_a_heading_covers_a_command_only_by_naming_it_in_code():
 
 def test_every_subcommand_has_a_heading_on_the_commands_page(rce):
     commands = []
-    for group in ("", "device", "snapshot"):
+    for group in ("", "device", "firmware", "snapshot"):
         result = rce.run(*group.split(), "--help")
         assert result.returncode == 0, result.stderr
         commands += [f"{group} {name}".strip() for name in SUBCOMMAND.findall(result.stdout)]

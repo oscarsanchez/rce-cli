@@ -1,11 +1,12 @@
 """`rce device start`: a Run with safe defaults that comes back ready to use."""
 
+import json
 import math
 import time
 from datetime import datetime, timedelta
 
 import pytest
-from conftest import TOKEN
+from conftest import TOKEN, heading_rows
 from fake_rce import (
     ALREADY_RUNNING,
     NO_ANSWER,
@@ -45,14 +46,14 @@ def test_start_defaults_to_an_hour_the_latest_firmware_and_the_live_state(rce, f
     assert start.json() == {"snapshot_id": 998, "firmware_version_id": "395", "max_runtime": 3600}
 
 
-def test_start_without_a_dev_snapshot_warns_that_it_uses_the_live_state(rce, fake_rce):
+def test_start_without_a_dev_snapshot_warns_that_it_uses_the_live_snapshot(rce, fake_rce):
     player(rce, fake_rce)
 
     result = rce.run("device", "start", "player")
 
     assert result.returncode == 0, result.stderr
     assert "no Dev Snapshot" in result.stderr
-    assert "998" in result.stderr
+    assert "Live Snapshot 998" in result.stderr
 
 
 def test_start_uses_the_dev_snapshot_when_one_is_recorded(rce, fake_rce):
@@ -121,6 +122,42 @@ def test_start_prints_cost_and_auto_stop_for_people_without_secrets(rce, fake_rc
     assert "auto-stops" in result.stdout
     for secret in (*WEBRTC_SECRETS, TOKEN):
         assert secret not in result.stdout + result.stderr
+
+
+def test_start_json_names_the_runs_firmware_next_to_its_id(rce, fake_rce):
+    player(rce, fake_rce)
+
+    run = rce.json("device", "start", "player", "--firmware", "304")["run"]
+
+    assert run["firmware_version_id"] == "304"
+    assert run["firmware_version_display_name"] == "v15.3.4 b872"
+
+
+def start_rows(result) -> dict[str, str]:
+    """The lines under `device start`'s human report, as {heading: value}."""
+    assert result.returncode == 0, result.stderr
+    return heading_rows(result.stdout.splitlines()[1:])
+
+
+def test_start_for_people_names_the_firmware_and_the_live_snapshot_without_a_dev_snapshot(
+    rce, fake_rce
+):
+    player(rce, fake_rce)
+
+    result = rce.run("device", "start", "player")
+
+    assert start_rows(result) == {"Firmware": "v16.0.4 b853", "Snapshot": "998 (Live snapshot)"}
+    assert "no Dev Snapshot" in result.stderr
+
+
+def test_start_for_people_names_the_dev_snapshot_it_started_from(rce, fake_rce):
+    player(rce, fake_rce)
+    fake_rce.add_snapshot(351, 1001)
+    record_dev_snapshot(rce, "player", 1001)
+
+    result = rce.run("device", "start", "player", "--firmware", "304")
+
+    assert start_rows(result) == {"Firmware": "v15.3.4 b872", "Snapshot": "1001 (Dev snapshot)"}
 
 
 def test_start_json_never_includes_run_credentials(rce, fake_rce):
@@ -475,3 +512,70 @@ def test_ctrl_c_while_explaining_rces_refusal_still_ends_with_the_stop(rce, fake
     assert result.returncode == 130
     assert fake_rce.requests_to("POST", STOP)
     assert "is billing" not in result.stderr
+
+
+def dev_snapshot_on(rce, fake_rce, firmware_id: str, display_name: str) -> None:
+    """The player's Dev Snapshot 1001, saved on the given Firmware."""
+    fake_rce.add_snapshot(351, 1001).update(
+        name="dev-ready", firmware_version_id=firmware_id, firmware_version_display_name=display_name
+    )
+    record_dev_snapshot(rce, "player", 1001)
+
+
+def test_a_firmware_other_than_the_snapshots_warns_and_still_starts(rce, fake_rce):
+    player(rce, fake_rce)
+    dev_snapshot_on(rce, fake_rce, "395", "v16.0.4 b853")
+
+    result = rce.run("device", "start", "player", "--firmware", "304", "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert "Snapshot 1001 (dev-ready) was saved on Firmware v16.0.4 b853 (395); this Run gets Firmware 304" in result.stderr
+    assert "`rce device start player --firmware 395`" in result.stderr
+    assert json.loads(result.stdout)["run"]["firmware_version_id"] == "304"
+    [start] = fake_rce.requests_to("POST", START)
+    assert start.json() == {"snapshot_id": 1001, "firmware_version_id": "304", "max_runtime": 3600}
+
+
+def test_the_default_firmware_other_than_the_snapshots_warns_too(rce, fake_rce):
+    player(rce, fake_rce)
+    dev_snapshot_on(rce, fake_rce, "304", "v15.3.4 b872")
+
+    result = rce.run("device", "start", "player")
+
+    assert result.returncode == 0, result.stderr
+    assert "saved on Firmware v15.3.4 b872 (304); this Run gets Firmware 395" in result.stderr
+
+
+@pytest.mark.parametrize("firmware_id", ["395", None])
+def test_the_snapshots_own_or_unknown_firmware_gives_no_warning(rce, fake_rce, firmware_id):
+    player(rce, fake_rce)
+    dev_snapshot_on(rce, fake_rce, firmware_id, None)
+
+    result = rce.run("device", "start", "player")
+
+    assert result.returncode == 0, result.stderr
+    assert "saved on Firmware" not in result.stderr
+
+
+def test_a_failed_read_of_the_snapshot_still_starts(rce, fake_rce):
+    player(rce, fake_rce)
+    dev_snapshot_on(rce, fake_rce, "395", "v16.0.4 b853")
+    fake_rce.fail_next("GET", f"{DEVICE}/snapshots/1001", Response(500, {"detail": "boom"}))
+
+    result = rce.run("device", "start", "player", "--firmware", "304")
+
+    assert result.returncode == 0, result.stderr
+    assert "saved on Firmware" not in result.stderr
+    assert fake_rce.requests_to("POST", START)
+
+
+def test_an_empty_answer_to_the_snapshot_read_still_starts(rce, fake_rce):
+    player(rce, fake_rce)
+    dev_snapshot_on(rce, fake_rce, "395", "v16.0.4 b853")
+    fake_rce.fail_next("GET", f"{DEVICE}/snapshots/1001", Response(200, b""))
+
+    result = rce.run("device", "start", "player", "--firmware", "304")
+
+    assert result.returncode == 0, result.stderr
+    assert "saved on Firmware" not in result.stderr
+    assert fake_rce.requests_to("POST", START)
