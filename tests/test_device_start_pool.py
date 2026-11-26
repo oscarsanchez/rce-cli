@@ -519,3 +519,17 @@ def test_ctrl_c_after_a_claim_made_while_waiting_stops_its_run(rce, fake_rce):
     assert result.returncode == 130
     assert "stopped the Run of Cloud Device 375" in result.stderr
     assert stops(fake_rce) == ["/api/v1/devices/375/stop"]
+
+
+def test_pool_warns_of_another_firmware_only_once_a_start_is_accepted(rce, fake_rce):
+    pool(rce, fake_rce, {375: 2001, 376: 2002})
+    for id, snapshot in ((375, 2001), (376, 2002)):
+        [saved] = [s for s in fake_rce.snapshots[id] if s["id"] == snapshot]
+        saved.update(firmware_version_id="304", firmware_version_display_name="v15.3.4 b872")
+        fake_rce.fail_next("POST", start_path(id), ALREADY_RUNNING)
+
+    result = rce.run("device", "start", "--pool")
+
+    assert result.returncode == 4, result.stderr
+    assert set(starts(fake_rce)) == {375, 376}  # both were tried, neither claimed
+    assert "saved on Firmware" not in result.stderr

@@ -147,6 +147,8 @@ def main() -> int:
     args = parser.parse_args()
     if not 0 < args.max_runtime <= MAX_RUNTIME:
         parser.error(f"--max-runtime takes 1 to {MAX_RUNTIME} seconds, not {args.max_runtime}.")
+    if args.firmware == "":  # an unset variable: `rce` would quietly use the default Firmware
+        parser.error("--firmware takes a Firmware id, from `rce firmware list`.")
     device = os.environ.get("RCE_AGENT_DEVICE")
     if not device:
         say("RCE_AGENT_DEVICE names no Cloud Device: start nothing, and ask.")

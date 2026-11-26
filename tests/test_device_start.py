@@ -529,8 +529,8 @@ def test_a_firmware_other_than_the_snapshots_warns_and_still_starts(rce, fake_rc
     result = rce.run("device", "start", "player", "--firmware", "304", "--json")
 
     assert result.returncode == 0, result.stderr
-    assert "Snapshot 1001 (dev-ready) was saved on Firmware v16.0.4 b853 (395), not 304" in result.stderr
-    assert "--firmware 395" in result.stderr
+    assert "Snapshot 1001 (dev-ready) was saved on Firmware v16.0.4 b853 (395); this Run gets Firmware 304" in result.stderr
+    assert "`rce device start player --firmware 395`" in result.stderr
     assert json.loads(result.stdout)["run"]["firmware_version_id"] == "304"
     [start] = fake_rce.requests_to("POST", START)
     assert start.json() == {"snapshot_id": 1001, "firmware_version_id": "304", "max_runtime": 3600}
@@ -543,7 +543,7 @@ def test_the_default_firmware_other_than_the_snapshots_warns_too(rce, fake_rce):
     result = rce.run("device", "start", "player")
 
     assert result.returncode == 0, result.stderr
-    assert "saved on Firmware v15.3.4 b872 (304), not 395" in result.stderr
+    assert "saved on Firmware v15.3.4 b872 (304); this Run gets Firmware 395" in result.stderr
 
 
 @pytest.mark.parametrize("firmware_id", ["395", None])
@@ -561,6 +561,18 @@ def test_a_failed_read_of_the_snapshot_still_starts(rce, fake_rce):
     player(rce, fake_rce)
     dev_snapshot_on(rce, fake_rce, "395", "v16.0.4 b853")
     fake_rce.fail_next("GET", f"{DEVICE}/snapshots/1001", Response(500, {"detail": "boom"}))
+
+    result = rce.run("device", "start", "player", "--firmware", "304")
+
+    assert result.returncode == 0, result.stderr
+    assert "saved on Firmware" not in result.stderr
+    assert fake_rce.requests_to("POST", START)
+
+
+def test_an_empty_answer_to_the_snapshot_read_still_starts(rce, fake_rce):
+    player(rce, fake_rce)
+    dev_snapshot_on(rce, fake_rce, "395", "v16.0.4 b853")
+    fake_rce.fail_next("GET", f"{DEVICE}/snapshots/1001", Response(200, b""))
 
     result = rce.run("device", "start", "player", "--firmware", "304")
 

@@ -96,6 +96,16 @@ def test_firmware_is_passed_on_to_the_start(rce, fake_rce):
     assert len(fake_rce.requests_to("POST", STOP)) == 1
 
 
+def test_an_empty_firmware_is_refused_before_any_rce_call(rce, fake_rce):
+    agents_device(rce, fake_rce)
+
+    result = live_run(rce, "ticket-04", "--firmware", "", "--", "true")
+
+    assert result.returncode == 2
+    assert "--firmware" in result.stderr
+    assert fake_rce.requests == []
+
+
 def test_a_failing_command_still_stops_the_run_and_its_status_is_passed_on(rce, fake_rce):
     agents_device(rce, fake_rce)
 

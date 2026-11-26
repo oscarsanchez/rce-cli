@@ -865,23 +865,25 @@ def start_snapshot(api: CoreAPI, options: StartOptions, ref: DeviceRef) -> int:
     return live
 
 
-def warn_if_other_firmware(api: CoreAPI, ref: DeviceRef, snapshot_id: int, firmware_id: str) -> None:
-    """Warn when a Run gets another Firmware than its Snapshot was saved on: there a Dev
-    Snapshot's dev app may not launch (live check, 2026-11-26). Advisory: a failed read
-    of the Snapshot skips it, and the start goes on either way."""
+def other_firmware_warning(api: CoreAPI, ref: DeviceRef, snapshot_id: int, firmware_id: str) -> str | None:
+    """The warning for a Run that gets another Firmware than its Snapshot was saved on:
+    there a Dev Snapshot's dev app may not launch (live check, 2026-11-26). Advisory: a
+    failed or empty read of the Snapshot gives none."""
     try:
         snapshot = api.get(f"/devices/{ref.id}/snapshots/{snapshot_id}")
     except RceError:
-        return
+        return None
+    if not isinstance(snapshot, dict):
+        return None
     saved_on = snapshot.get("firmware_version_id")
     if saved_on is None or saved_on == firmware_id:
-        return
+        return None
     name = f" ({snapshot['name']})" if snapshot.get("name") else ""
     shown = snapshot.get("firmware_version_display_name")
-    warn(
+    return (
         f"Snapshot {snapshot_id}{name} was saved on Firmware "
-        f"{f'{shown} ({saved_on})' if shown else saved_on}, not {firmware_id}: "
-        f"the dev app may not launch. Start with --firmware {saved_on} to match it."
+        f"{f'{shown} ({saved_on})' if shown else saved_on}; this Run gets Firmware {firmware_id}, "
+        f"where the dev app may not launch. To match it: `rce device start {ref.arg} --firmware {saved_on}`."
     )
 
 
@@ -958,7 +960,11 @@ class CommandRun:
             "firmware_version_id": options.firmware or default_firmware_id(api, device["device_type"]),
             "max_runtime": options.max_runtime,
         }
-        warn_if_other_firmware(api, ref, body["snapshot_id"], body["firmware_version_id"])
+        # setup-dev's Live Snapshot has no dev app yet. Read before the start, which may
+        # change the Snapshot; warned only once RCE accepts it (a Pool skips refused members).
+        warning = None if options.latest else other_firmware_warning(
+            api, ref, body["snapshot_id"], body["firmware_version_id"]
+        )
         try:
             self.start_unknown = True
             try:
@@ -972,6 +978,8 @@ class CommandRun:
                 raise self._uncertain(error)
             self.start_unknown = False
             self.started = True
+            if warning:
+                warn(warning)
             wait = wait_until_ready if options.wait else wait_for_run
             try:
                 self.device = wait(api, ref, options.timeout)
