@@ -22,7 +22,7 @@ With no token it exits 2 and names every place it looked. `rce` never prints the
 
 | Command | What it does |
 |---|---|
-| `rce --version` | Print the version, e.g. `rce 0.2.3`. Needs no token, config or network. |
+| `rce --version` | Print the version, e.g. `rce 0.3.0`. Needs no token, config or network. |
 | `rce token set [--json]` | Store the RCE token in rk's file from a hidden prompt or stdin. `--json` prints `{"path": "<rk's file>"}`. |
 | `rce token status [--json]` | The token's owner, organisation, expiry, and trial minutes left. |
 | `rce device list [--running] [--pool] [--json]` | Your Cloud Devices: id, Device Name, RCE name, type, status, and the active Run if there is one. `--running` shows only Cloud Devices with a Run (pending or running). `--pool` shows only the Pool's members, in `RCE_POOL` order, each with its Dev Snapshot's state (ready, not ready or missing: RCE deletes a Snapshot unused for 180 days), and "<free> of <members> free", a Free Cloud Device being one with no Run, pending or running. It sends only reads, one device list and one Snapshot read per member. A malformed `RCE_POOL` exits 2, as does a Retired Cloud Device in it; an RCE id RCE doesn't know exits 3. See [`device list --json`](#device-list---json). |

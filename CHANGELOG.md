@@ -4,6 +4,8 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
 ### Added
 
 - `rce firmware list [--type tv|stb] [--json]` shows the Firmware RCE offers for each device type (id, device type, display name) and marks the one `device start` uses when given no `--firmware`. It sends one read and starts nothing. The reference's new "Choosing Firmware" section, and the `rce` skill, say which Firmware suits an app, and `device start --help` points `--firmware` to the list.
@@ -15,6 +17,7 @@ What changed in each release of `rce`. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The pipeline recipes download `rce` at `v0.3.0`.
 - The docs, the `rce` skill, `device start --help` and `rce`'s messages name the Base Snapshot and the Live Snapshot. `device start`'s warning when a Cloud Device has no Dev Snapshot now reads "starting from its Live Snapshot <id>". The `BASE` and `LIVE` columns and the `base` and `live` JSON keys are unchanged.
 - `device start`'s error when RCE offers no Firmware for the Cloud Device's type now reads "RCE offers no Firmware for device type ..." (it said "firmware").
 
@@ -108,7 +111,8 @@ If you keep the CLI install too, pull and run `./install.sh` again: `rce` moved 
 - `rce`, a command-line client for Roku® Cloud Emulator, and a Claude Code plugin whose skill teaches Claude to use it. From any directory and any Roku project, it lists, starts and stops Cloud Devices, sideloads, reads the BrightScript console, sends ECP commands and remote keys, takes screenshots, forwards debugger ports, sets up developer mode with a Dev Snapshot, and creates and retires Cloud Devices. It needs only uv, on macOS or Linux, and your own RCE token.
 - Three installs: the Claude Code plugin (the skill, the Stop hook that warns about a Run still billing, and `rce` on Claude's PATH), the terminal install (clone and `./install.sh`), and, for pipelines, the single `bin/rce` script downloaded at a release tag.
 
-[Unreleased]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/oscarsanchez/rce-cli/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/oscarsanchez/rce-cli/compare/v0.2.0...v0.2.1
